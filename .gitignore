@@ -1,0 +1,22 @@
+# Secrets / local
+.env
+.env.*
+*.key
+secrets.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# Build / node
+node_modules/
+__pycache__/
+*.pyc
+
+# Optional heavy archives
+*.rar
+*.zip
+
+# Chrome extension local (none expected)
+Siriser-AI-Evaluator/.data/

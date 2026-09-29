@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Siriser Edit Bench · 图像编辑评测标注台</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="topbar" data-testid="topbar">
+    <div class="brand">
+      <span class="brand-mark">Siriser</span>
+      <span class="brand-title">Edit Bench 标注台</span>
+      <span class="brand-sub">IMAGE-BENCHMARK / EVAL</span>
+    </div>
+    <div class="topbar-spacer"></div>
+    <div class="task-meta">
+      <span data-testid="task-id">TASK <strong id="taskId">—</strong></span>
+      <span data-testid="task-progress"><strong id="taskIndex">0</strong>/<strong id="taskTotal">0</strong></span>
+      <span class="pill accent" id="modePill">人工评分</span>
+    </div>
+  </header>
+
+  <main class="shell">
+    <!-- 左：指令 + 参考图 -->
+    <aside class="col">
+      <div class="col-scroll">
+        <section class="panel">
+          <div class="panel-h">
+            <h2>Edit Instruction</h2>
+            <span class="pill">prompt</span>
+          </div>
+          <div class="panel-b">
+            <div class="prompt-lang" data-testid="prompt-lang">ZH · edit instruction</div>
+            <p class="prompt-text" id="promptText" data-testid="prompt">加载中…</p>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-h">
+            <h2>Reference</h2>
+            <span class="pill">原图</span>
+          </div>
+          <div class="panel-b">
+            <div class="img-frame" data-testid="reference-image">
+              <span class="img-label">REF</span>
+              <img id="refImage" src="assets/ref-01.jpg" alt="参考原图" />
+            </div>
+          </div>
+        </section>
+      </div>
+    </aside>
+
+    <!-- 中：模型生成图 -->
+    <section class="col">
+      <div class="col-scroll">
+        <div class="center-head">
+          <h1>模型生成对比</h1>
+          <span class="hint">点击卡片选择待评模型 · 快捷键 1–6</span>
+        </div>
+        <div class="models-grid" id="modelsGrid" data-testid="models-grid" aria-live="polite">
+          <!-- JS 注入 -->
+        </div>
+      </div>
+    </section>
+
+    <!-- 右：五维评分 -->
+    <aside class="col">
+      <div class="col-scroll">
+        <section class="panel">
+          <div class="panel-h">
+            <h2>五维评分 · <span id="activeModelLabel">A</span></h2>
+            <span class="pill" id="scoreModePill">1–10 整数</span>
+          </div>
+          <div class="panel-b">
+            <div class="score-form" id="scoreForm" data-testid="score-panel">
+              <!-- JS 注入 5 个维度 -->
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-h">
+            <h2>AI 自动评分</h2>
+            <span class="pill" id="apiPill">mock</span>
+          </div>
+          <div class="panel-b">
+            <div class="ai-box">
+              <div class="ai-status">
+                <span class="dot" id="aiDot"></span>
+                <span id="aiStatus">就绪。可对当前题全部模型调用评分。</span>
+              </div>
+              <div class="progress" aria-hidden="true"><i id="aiProgress"></i></div>
+              <div class="score-actions">
+                <button type="button" class="primary" id="btnAutoAll">AI 评全部模型</button>
+                <button type="button" id="btnAutoOne">只评当前模型</button>
+                <button type="button" id="btnClear">清空当前</button>
+                <button type="button" id="btnSubmit">提交本题</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-h">
+            <h2>运行日志</h2>
+          </div>
+          <div class="panel-b">
+            <div class="log" id="logBox" data-testid="log"></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="footer-nav">
+        <button type="button" id="btnPrev">← 上一题</button>
+        <button type="button" class="primary" id="btnNext">下一题 →</button>
+      </div>
+    </aside>
+  </main>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script src="js/scoring-prompt.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
