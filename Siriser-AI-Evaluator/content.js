@@ -268,6 +268,84 @@
    * 徽章「参考图」「模型-A」通常贴在图片旁/上
    * 策略：找标签 → 邻近 img
    */
+
+  /** 页面上的「模型-X」标签 */
+  function findModelLabels() {
+    const re =
+      HEU.modelPattern ||
+      /(?:模型|model|Model)\s*[-–—_：: ]*\s*([A-Za-z0-9]{1,4})/i;
+    return findTextLabels(re, document.body).filter((h) => {
+      const id = extractModelId(h.raw || textOf(h.el));
+      return id && /^[A-Z0-9]{1,4}$/.test(id);
+    });
+  }
+
+  /** 真实生成图：排除错误占位图、icon、过小图 */
+  function isRealGenImg(im) {
+    if (!im) return false;
+    const w = im.naturalWidth || im.width || 0;
+    const h = im.naturalHeight || im.height || 0;
+    const src = (im.currentSrc || im.src || "").toLowerCase();
+    const alt = (im.alt || "").toLowerCase();
+    if (w < 80 || h < 80) return false;
+    if (/could not|error|placeholder|broken|fail/i.test(src + " " + alt)) return false;
+    if (/logo|icon|avatar|spinner/i.test(alt + " " + (im.className || ""))) return false;
+    return true;
+  }
+
+  /** 站点图片加载异常（仅显式失败，不把「暂时没图」当异常） */
+  function isImageBroken(labelEl, img) {
+    // 文案明确写了加载失败
+    const txt = textOf(labelEl && (labelEl.parentElement || labelEl));
+    if (/图片加载异常|图片加载失败|图片错误|图裂|无法加载|加载不出/.test(txt)) {
+      return true;
+    }
+    if (!img) return false; // 只是没找到 img，不算异常
+    const w = img.naturalWidth || img.width || 0;
+    const h = img.naturalHeight || img.height || 0;
+    // 已加载完却是 0 尺寸 / 破图 alt
+    if (img.complete && w < 80 && h < 80) return true;
+    const s = (img.currentSrc || img.src || "").toLowerCase();
+    const a = (img.alt || "").toLowerCase();
+    if (/could not process|load error|broken|placeholder/i.test(s + " " + a)) return true;
+    return false;
+  }
+
+  /** 换题后图片可能未加载完（0×0）；等到有尺寸再采集 */
+  async function waitForImagesReady(timeoutMs) {
+    try {
+      const t0 = Date.now();
+      const limit = timeoutMs || 15000;
+      for (;;) {
+        const labels = findModelLabels();
+        let ready = 0;
+        labels.forEach(({ el }) => {
+          const card = resolveModelCard(el);
+          const img = pickLargestImg(card);
+          const w = img && (img.naturalWidth || img.width || 0);
+          if (img && w >= 80) ready += 1;
+        });
+        if (labels.length && ready >= labels.length) {
+          log(`图片就绪 ${ready}/${labels.length}`);
+          return true;
+        }
+        if (Date.now() - t0 > limit) {
+          log(`等图超时 ready=${ready}/${labels.length || 0}`, "err");
+          return false;
+        }
+        await sleep(500);
+      }
+    } catch (e) {
+      log("等图异常(忽略)：" + (e && e.message));
+      return true;
+    }
+  }
+  // 挂到全局，避免打包/注入后作用域找不到
+  try {
+    window.__SIRISER_WAIT_IMAGES__ = waitForImagesReady;
+    window.waitForImagesReady = waitForImagesReady;
+  } catch (_) {}
+
   function collectVisuals() {
     const { content } = getAreas();
     const modelRe = HEU.modelLabel || /(?:模型|model)\s*[-–—_：: ]*\s*([A-Za-z0-9]{1,4})/i;
@@ -285,49 +363,7 @@
 
     const refLabels = findTextLabels(refRe, content).concat(findTextLabels(refRe, document.body));
 
-  /** 真实生成图：排除错误占位图、icon、过小图 */
-  function isRealGenImg(im) {
-    if (!im) return false;
-    const w = im.naturalWidth || im.width || 0;
-    const h = im.naturalHeight || im.height || 0;
-    const src = (im.currentSrc || im.src || "").toLowerCase();
-    const alt = (im.alt || "").toLowerCase();
-    // 未加载完 / 加载失败占位
-    if (w < 80 || h < 80) return false;
-    if (/could not|error|placeholder|broken|fail/i.test(src + " " + alt)) return false;
-    if (/logo|icon|avatar|spinner/i.test(alt + " " + (im.className || ""))) return false;
-    return true;
-  }
-
-  /** 换题后图片可能未加载完（0×0）；等到有尺寸再采集 */
-  async function waitForImagesReady(timeoutMs) {
-    const t0 = Date.now();
-    const limit = timeoutMs || 15000;
-    for (;;) {
-      const labels = findModelLabels();
-      let ready = 0;
-      let total = labels.length || 1;
-      labels.forEach(({ el }) => {
-        const card = resolveModelCard(el);
-        const img = pickLargestImg(card);
-        const w = img && (img.naturalWidth || img.width || 0);
-        if (img && w >= 80) ready += 1;
-      });
-      // 也可看页面上大图数量
-      const bigImgs = qa("img").filter(isRealGenImg).length;
-      if (labels.length && ready >= labels.length) {
-        log(`图片就绪 ${ready}/${labels.length}`);
-        return true;
-      }
-      if (Date.now() - t0 > limit) {
-        log(`等图超时 ready=${ready}/${total} bigImgs=${bigImgs}`, "err");
-        return false;
-      }
-      await sleep(500);
-    }
-  }
-
-  function imgNear(labelEl) {
+    function imgNear(labelEl) {
     const grab = (root) => {
       if (!root) return null;
       const imgs = qa("img", root).filter(isRealGenImg);
@@ -458,7 +494,19 @@
       });
     }
 
+    // 图片加载异常 → 标记 broken，后面五维打「无」
     Array.from(models.values()).forEach((m) => {
+      const broken = isImageBroken(m.labelEl, m.imgEl);
+      m.broken = broken;
+      if (broken) {
+        m.images = [];
+        m.brokenNote = "image_load_error";
+        log(`图 ${m.id} 加载异常 → 五维将勾「无」`, "err");
+      }
+    });
+
+    Array.from(models.values()).forEach((m) => {
+      if (m.broken) return;
       log(
         m.images.length
           ? `图 ${m.id} ${m.meta.name} ${m.meta.w}x${m.meta.h}`
@@ -1068,10 +1116,152 @@
     } catch (_) {}
   }
 
+  // ── 模型历史分统计 + 异常校验 ──
+  const STATS_KEY = "SIRISER_MODEL_STATS";
+
+  function loadModelStats() {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get([STATS_KEY], (r) => resolve(r[STATS_KEY] || {}));
+      } catch (_) {
+        resolve({});
+      }
+    });
+  }
+  function saveModelStats(st) {
+    try {
+      chrome.storage.local.set({ [STATS_KEY]: st });
+    } catch (_) {}
+  }
+
+  function scoreDims(s) {
+    return DIMS.map((k) => s[k]).filter((v) => typeof v === "number");
+  }
+
+  /** 更新历史：n, avg, 低分率(均分≤4), 高分率(≥9), 每维均值 */
+  async function updateModelStats(scores) {
+    const st = await loadModelStats();
+    (scores || []).forEach((s) => {
+      const vals = scoreDims(s);
+      if (!vals.length) return;
+      const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+      const id = s.model;
+      const row = st[id] || {
+        n: 0,
+        sum: 0,
+        low: 0,
+        high: 0,
+        dimSum: { alignment: 0, quality: 0, preservation: 0, consistency: 0, realism: 0 },
+      };
+      row.n += 1;
+      row.sum += avg;
+      if (avg <= 4) row.low += 1;
+      if (avg >= 9) row.high += 1;
+      DIMS.forEach((k) => {
+        if (typeof s[k] === "number") row.dimSum[k] = (row.dimSum[k] || 0) + s[k];
+      });
+      st[id] = row;
+    });
+    saveModelStats(st);
+    return st;
+  }
+
+  function modelHistAvg(row) {
+    return row && row.n > 0 ? row.sum / row.n : null;
+  }
+  function modelLowRate(row) {
+    return row && row.n > 0 ? row.low / row.n : null;
+  }
+
+  /**
+   * 异常判断（只标注，不改分）：
+   * - 对比历史史均；偏差过大
+   * - 与历史强弱排序相反
+   */
+  async function flagAnomalousScores(scores) {
+    const st = await loadModelStats();
+    const flags = {};
+    const histAvgs = {};
+    (scores || []).forEach((s) => {
+      const vals = scoreDims(s);
+      if (!vals.length) return;
+      const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+      const row = st[s.model];
+      if (!row || row.n < 3) return;
+      const hist = modelHistAvg(row);
+      histAvgs[s.model] = hist;
+      const notes = [];
+      if (avg <= hist - 1.5) notes.push(`低于史均${hist.toFixed(1)}`);
+      if (avg >= hist + 1.5) notes.push(`高于史均${hist.toFixed(1)}`);
+      const lowR = modelLowRate(row);
+      if (lowR != null && avg <= 4 && lowR < 0.15) notes.push("罕见低分");
+      if (lowR != null && avg >= 9 && row.high / row.n < 0.15) notes.push("罕见高分");
+      if (notes.length) {
+        flags[s.model] = notes.join("、");
+        s.notes = ((s.notes || "") + " ⚠" + notes.join("、")).trim();
+        s._anomaly = notes.join("、");
+        log(`异常标记 ${s.model} avg=${avg.toFixed(1)} hist=${hist.toFixed(1)} ${notes.join("、")}`, "err");
+      }
+    });
+
+    // 排序：历史明显更好却这次更差
+    const scored = (scores || []).filter((s) => scoreDims(s).length);
+    for (let i = 0; i < scored.length; i++) {
+      for (let j = 0; j < scored.length; j++) {
+        if (i === j) continue;
+        const a = scored[i];
+        const b = scored[j];
+        const ha = histAvgs[a.model];
+        const hb = histAvgs[b.model];
+        if (ha == null || hb == null) continue;
+        const avgA = scoreDims(a).reduce((x, y) => x + y, 0) / scoreDims(a).length;
+        const avgB = scoreDims(b).reduce((x, y) => x + y, 0) / scoreDims(b).length;
+        // 历史 A 比 B 高 1.5+，这次却低 1.5+
+        if (ha >= hb + 1.5 && avgA <= avgB - 1.5) {
+          const tag = `排序反常(${a.model}史${ha.toFixed(1)}<${b.model}史${hb.toFixed(1)}却本次反)`;
+          a._anomaly = ((a._anomaly || "") + " " + tag).trim();
+          a.notes = ((a.notes || "") + " ⚠" + tag).trim();
+          log(tag, "err");
+          break; // 每模型标一次即可
+        }
+      }
+    }
+    return flags;
+  }
+
+  /** 把历史史均写进评分请求；史均不足则用基础先验 */
+  async function buildHistHint(models) {
+    const st = await loadModelStats();
+    const prior = (CFG && CFG.MODEL_PRIOR) || {};
+    const parts = [];
+    (models || []).forEach((m) => {
+      const row = st[m.id];
+      if (row && row.n >= 3) {
+        const hist = modelHistAvg(row);
+        parts.push(`${m.id}史均${hist.toFixed(1)}(n=${row.n})`);
+      } else if (prior[m.id] != null) {
+        parts.push(`${m.id}先验${Number(prior[m.id]).toFixed(1)}`);
+      }
+    });
+    if (!parts.length) return "";
+    return (
+      "\n【历史史均/先验参考】" +
+      parts.join("，") +
+      "\n说明：一般 A–D 往往更好、靠后模型略弱；此为先验，仍以本图视觉为准。若本次与先验趋势相反，请更谨慎核对。"
+    );
+  }
+
   async function applyScores(scores, meta) {
+    // 先做异常标记（不改分），再勾选
+    try {
+      await flagAnomalousScores(scores);
+    } catch (e) {
+      log("异常校验失败(忽略)：" + (e && e.message));
+    }
     const { groups } = collectScoreGroups();
     const report = [];
     let clicked = 0;
+    const clickT0 = Date.now();
 
     for (const s of scores) {
       const bag = groups.get(s.model) || {};
@@ -1101,7 +1291,8 @@
         // 点之前确认五维目标不是同一个元素
         fireClick(target);
         markSelected(target);
-        await sleep(80);
+        const gap = await humanClickDelay();
+        if (gap > 500) log(`拟人间隔 ${gap}ms`);
         log(`点击 ${s.model} ${dim}→${v}`);
         line.filled.push(dim + "=" + (v == null ? "无" : v));
         line._targets = line._targets || [];
@@ -1121,8 +1312,138 @@
       log(`勾选 ${s.model}: ${line.filled.join(" ")} ${line.miss.join(",")}`);
     }
 
-    showResultPanel(scores, report, clicked, meta);
+    const clickMs = Date.now() - clickT0;
+    showResultPanel(scores, report, clicked, { ...(meta || {}), clickMs });
+    // 写入历史后再刷新统计摘要
+    try {
+      await updateModelStats(scores);
+    } catch (_) {}
+    try {
+      await appendStatsSummary(scores);
+    } catch (_) {}
     return clicked;
+  }
+
+  /** 结果窗底部附加历史低分率摘要 */
+  async function appendStatsSummary(scores) {
+    const st = await loadModelStats();
+    const body = document.getElementById("siriser-result-body");
+    if (!body) return;
+    let el = document.getElementById("siriser-stats");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "siriser-stats";
+      body.appendChild(el);
+    }
+    const rows = (scores || []).map((s) => {
+      const row = st[s.model];
+      const n = row ? row.n : 0;
+      const hist = modelHistAvg(row);
+      const low = modelLowRate(row);
+      const prior =
+        (CFG && CFG.MODEL_PRIOR && CFG.MODEL_PRIOR[s.model] != null)
+          ? Number(CFG.MODEL_PRIOR[s.model]).toFixed(1)
+          : "—";
+      const cur = scoreDims(s);
+      const curAvg = cur.length
+        ? (cur.reduce((a, b) => a + b, 0) / cur.length).toFixed(1)
+        : "—";
+      return `<div class="sir-st-row">
+        <b>${escapeHtml(s.model)}</b>
+        <span>本次 ${curAvg}</span>
+        <span>${n >= 3 ? "史均" : "先验"} ${n >= 3 && hist != null ? hist.toFixed(1) : prior}</span>
+        <span>n=${n}</span>
+        <span>低分率 ${low == null ? "—" : (low * 100).toFixed(0)}%</span>
+        ${s._anomaly ? `<span class="err">⚠${escapeHtml(s._anomaly)}</span>` : ""}
+      </div>`;
+    });
+    el.innerHTML = `<div class="sir-st-sum"><strong>历史统计</strong>（低分=均分≤4）</div>` + rows.join("");
+  }
+
+  /** 打开模型统计面板 */
+  async function showStatsPanel() {
+    const st = await loadModelStats();
+    let panel = document.getElementById("siriser-stats-panel");
+    if (!panel) {
+      panel = document.createElement("div");
+      panel.id = "siriser-stats-panel";
+      panel.innerHTML = `
+        <div class="sir-r-h sir-drag">
+          <strong>模型历史统计</strong>
+          <span class="sir-r-acts">
+            <button type="button" data-s="export">导出CSV</button>
+            <button type="button" data-s="reset">重置</button>
+            <button type="button" data-s="close">关闭</button>
+          </span>
+        </div>
+        <div class="sir-r-b" id="siriser-stats-body"></div>`;
+      document.body.appendChild(panel);
+      panel.addEventListener("click", async (e) => {
+        const b = e.target.closest("[data-s]");
+        if (!b) return;
+        const k = b.dataset.s;
+        if (k === "close") {
+          panel.classList.remove("open");
+          return;
+        }
+        if (k === "reset") {
+          if (confirm("确认清空全部模型历史统计？此操作不可恢复。")) {
+            saveModelStats({});
+            log("模型统计已重置");
+            await showStatsPanel();
+          }
+          return;
+        }
+        if (k === "export") {
+          const s2 = await loadModelStats();
+          const lines = ["model,n,hist_avg,low_rate,high_rate"];
+          Object.keys(s2).forEach((id) => {
+            const r = s2[id];
+            const avg = modelHistAvg(r);
+            const low = modelLowRate(r);
+            const high = r.n ? r.high / r.n : 0;
+            lines.push(
+              [id, r.n, avg == null ? "" : avg.toFixed(2), low == null ? "" : (low * 100).toFixed(1) + "%", (high * 100).toFixed(1) + "%"].join(",")
+            );
+          });
+          const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = "siriser-model-stats.csv";
+          a.click();
+          toastMsg("已导出 CSV");
+        }
+      });
+      try {
+        makeDraggable(panel, panel.querySelector(".sir-drag"));
+      } catch (_) {}
+    }
+    const body = panel.querySelector("#siriser-stats-body");
+    const ids = Object.keys(st).sort((a, b) =>
+      a.localeCompare(b, undefined, { numeric: true })
+    );
+    if (!ids.length) {
+      body.innerHTML = `<div class="sir-st-empty">还没有历史数据。跑过评分后这里会显示各模型史均与低分率。</div>`;
+    } else {
+      body.innerHTML =
+        `<div class="sir-st-head"><span>模型</span><span>次数</span><span>史均</span><span>低分率</span><span>高分率</span></div>` +
+        ids
+          .map((id) => {
+            const r = st[id];
+            const avg = modelHistAvg(r);
+            const low = modelLowRate(r);
+            const high = r.n ? r.high / r.n : 0;
+            return `<div class="sir-st-row2">
+              <b>${escapeHtml(id)}</b>
+              <span>${r.n}</span>
+              <span>${avg == null ? "—" : avg.toFixed(2)}</span>
+              <span>${low == null ? "—" : (low * 100).toFixed(0)}%</span>
+              <span>${(high * 100).toFixed(0)}%</span>
+            </div>`;
+          })
+          .join("");
+    }
+    panel.classList.add("open");
   }
 
   function findTextButton(re) {
@@ -1245,6 +1566,8 @@
         " batch=" +
         batchSize
     );
+    const histHint = await buildHistHint(payloadModels).catch(() => "");
+    if (histHint) log("已附历史史均提示");
     let scores;
     try {
       scores = await window.SiriserAPI.evaluate(
@@ -1252,6 +1575,7 @@
           prompt: task.prompt,
           referenceImages: task.referenceImages,
           models: payloadModels,
+          histHint,
         },
         { ...CFG, BATCH_SIZE: batchSize }
       );
@@ -1273,11 +1597,25 @@
       const src =
         modelsToEval.find((m) => m.id === sid) ||
         modelsToEval.find((m) => m.id === s.model);
-      const hasLocalImg = src && src.images && src.images.length > 0;
+      const hasLocalImg = src && src.images && src.images.length > 0 && !src.broken;
       const allNull = [s.alignment, s.quality, s.preservation, s.consistency, s.realism].every(
         (v) => v == null
       );
 
+      // 站点图片加载异常 → 五维全部「无」
+      if (src && src.broken) {
+        log(`${src.id} 图片加载异常 → 勾「无」`);
+        return {
+          model: src.id,
+          alignment: null,
+          quality: null,
+          preservation: null,
+          consistency: null,
+          realism: null,
+          notes: "image_load_error",
+          _forceNa: true,
+        };
+      }
       if (!hasLocalImg) {
         return {
           model: src ? src.id : s.model,
@@ -1287,6 +1625,7 @@
           consistency: null,
           realism: null,
           notes: "no_image",
+          _forceNa: true,
         };
       }
       if (allNull) {
@@ -1307,12 +1646,15 @@
       apiMs: Date.now() - t0,
     });
     log("完成 · 用时 " + fmtDur(Date.now() - t0), "ok");
+    beepDone();
     return scores;
   }
 
   // ── 全自动模式 ──
   const AUTO_KEY = "SIRISER_AUTO";
   let _autoRunning = false;
+  let _cancelSubmit = false;
+  let _autoGen = 0;
 
   function loadAutoState() {
     return new Promise((resolve) => {
@@ -1333,7 +1675,7 @@
     return (scores || [])
       .filter((s) => {
         if (s._skipClick) return true;
-        if (s.notes === "no_image") return false;
+        if (s.notes === "no_image" || s.notes === "image_load_error" || s._forceNa) return false;
         return DIMS.every((k) => s[k] == null || s[k] === "na");
       })
       .map((s) => s.model);
@@ -1350,27 +1692,67 @@
     return false;
   }
 
-  async function stopAuto(reason) {
+  async function stopAuto(reason, opts) {
+    const silent = !!(opts && opts.silent);
+    _autoGen += 1;
     _autoRunning = false;
-    saveAutoState({ on: false, reason: reason || "stopped", at: Date.now() });
-    log("全自动停止：" + (reason || ""), "err");
+    _cancelSubmit = false;
+    saveAutoState({ on: false, phase: "off", submitAt: null, reason: reason || "stopped", at: Date.now() });
+    log("全自动停止：" + (reason || ""));
+    if (silent) return;
     try {
       alert("Siriser 全自动已停止：\n" + (reason || "异常"));
     } catch (_) {}
   }
 
-  async function autoOneTask() {
+  /** 开始新一轮前清掉旧倒计时，避免重载后串表 */
+  async function clearStoredCountdown() {
+    const st = await loadAutoState();
+    saveAutoState({
+      on: !!(st && st.on),
+      phase: "idle",
+      submitAt: null,
+      taskKey: null,
+      batchSize: (st && st.batchSize) || 3,
+    });
+    _cancelSubmit = true;
+    clearCountdownInPanel();
+    await sleep(50);
+    _cancelSubmit = false;
+  }
+
+  async function waitImagesSafe(ms) {
+    const fn =
+      typeof waitForImagesReady === "function"
+        ? waitForImagesReady
+        : window.__SIRISER_WAIT_IMAGES__ || window.waitForImagesReady;
+    if (typeof fn !== "function") {
+      log("waitForImagesReady 不可用，跳过等图", "err");
+      return true;
+    }
+    try {
+      return await fn(ms);
+    } catch (e) {
+      log("等图失败(忽略)：" + (e && e.message));
+      return true;
+    }
+  }
+
+  async function autoOneTask(gen) {
+    const myGen = gen == null ? _autoGen : gen;
+    // 新一轮：清掉可能残留的旧倒计时
+    await clearStoredCountdown();
     // 换题后图可能还没加载（0×0 → 压成 3KB → API 无分）
-    await waitForImagesReady(20000);
+    await waitImagesSafe(20000);
     await sleep(800);
 
-    // 1) 评分；缺分重试最多 2 次（共 3 轮）
     let scores = null;
     let missing = [];
     let retries = 0;
     for (;;) {
+      if (_autoGen !== myGen) return false;
       if (retries > 0) {
-        await waitForImagesReady(10000);
+        await waitImagesSafe(10000);
         await sleep(600);
       }
       scores = await runAutoScore(false, { batchSize: Number(CFG.AUTO_BATCH) || 3 });
@@ -1389,32 +1771,61 @@
       await sleep(2500);
     }
 
-    // 2) 结果窗倒计时，到点再提交（让操作者能看到何时提交）
+    if (_autoGen !== myGen) return false;
+
+    // 2) 本题新倒计时（覆盖旧 submitAt）
     const wait = randDelayMs();
     const deadline = Date.now() + wait;
-    saveAutoState({ on: true, phase: "countdown", submitAt: deadline });
-    log(`全自动：${fmtDur(wait)} 后提交（结果窗倒计时）`);
+    const taskKey = (taskPromptKey() || "t") + "@" + Date.now();
+    _cancelSubmit = false;
+    saveAutoState({
+      on: true,
+      phase: "countdown",
+      submitAt: deadline,
+      taskKey,
+      batchSize: Number(CFG.AUTO_BATCH) || 3,
+    });
+    log(`全自动：${fmtDur(wait)} 后提交（新倒计时 task=${taskKey}）`);
 
     while (Date.now() < deadline) {
+      if (_autoGen !== myGen) return false;
       const st = await loadAutoState();
-      if (!st.on) {
+      if (!st.on || _cancelSubmit) {
         clearCountdownInPanel();
+        saveAutoState({ ...st, phase: "idle", submitAt: null, taskKey: null });
+        log("倒计时已取消，不提交");
+        return false;
+      }
+      // 存储被别的实例改掉则退出
+      if (st.taskKey && st.taskKey !== taskKey) {
+        clearCountdownInPanel();
+        log("倒计时被新任务替换，旧闹钟作废");
         return false;
       }
       const left = deadline - Date.now();
-      updateCountdownInPanel(
-        `${fmtDur(left)} 后自动提交`,
-        left < 30 * 1000
-      );
+      updateCountdownInPanel(`${fmtDur(left)} 后自动提交`, left < 30 * 1000);
       await sleep(1000);
     }
 
+    if (_cancelSubmit || _autoGen !== myGen) {
+      clearCountdownInPanel();
+      return false;
+    }
     updateCountdownInPanel("正在提交…", true);
     const ok = submitAndNext();
     clearCountdownInPanel();
+    saveAutoState({ on: true, phase: "idle", submitAt: null, taskKey: null });
     if (!ok) log("全自动：提交按钮未找到", "err");
     else log("全自动：已提交", "ok");
     return ok;
+  }
+
+  function taskPromptKey() {
+    try {
+      return String(readPrompt() || "").slice(0, 40);
+    } catch (_) {
+      return "";
+    }
   }
 
   function randDelayMs() {
@@ -1426,69 +1837,100 @@
     if (_autoRunning) return;
     const st = await loadAutoState();
     if (!st.on) return;
+    const myGen = ++_autoGen;
     _autoRunning = true;
-    log("全自动循环启动");
+    const batchSize = Number(st.batchSize) || 3;
+    CFG.AUTO_BATCH = batchSize;
+    log("自动循环启动 batch=" + batchSize + " gen=" + myGen);
 
-    while (_autoRunning) {
+    while (_autoRunning && _autoGen === myGen) {
       const st2 = await loadAutoState();
-      if (!st2.on) break;
+      if (!st2.on || _autoGen !== myGen) break;
       try {
-        // 上一题若已在倒计时提交阶段（刷新恢复），不要再评分，直接等提交
-        if (st2.phase === "countdown" && st2.submitAt) {
+        // 仅恢复「仍有效的」倒计时（时间够长 + taskKey 对得上）
+        if (st2.phase === "countdown" && st2.submitAt && st2.taskKey) {
           const left = st2.submitAt - Date.now();
-          if (left > 0) {
+          const keyNow = taskPromptKey();
+          const sameTask = !keyNow || !st2.taskKey || st2.taskKey.indexOf(keyNow) === 0;
+          if (left > 45 * 1000 && sameTask) {
             log(`续跑：恢复倒计时 ${fmtDur(left)}`);
             const deadline = st2.submitAt;
-            while (Date.now() < deadline) {
+            const taskKey = st2.taskKey;
+            _cancelSubmit = false;
+            while (Date.now() < deadline && _autoGen === myGen) {
               const stc = await loadAutoState();
-              if (!stc.on) break;
+              if (!stc.on || _cancelSubmit || (stc.taskKey && stc.taskKey !== taskKey)) break;
               updateCountdownInPanel(
                 `${fmtDur(deadline - Date.now())} 后自动提交`,
                 deadline - Date.now() < 30000
               );
               await sleep(1000);
             }
-            updateCountdownInPanel("正在提交…", true);
-            submitAndNext();
             clearCountdownInPanel();
-            saveAutoState({ on: true, phase: "idle" });
-            await sleep(randDelayMs());
+            if (!_cancelSubmit && _autoGen === myGen) {
+              updateCountdownInPanel("正在提交…", true);
+              submitAndNext();
+            } else {
+              log("倒计时已取消/作废，不提交");
+            }
+            clearCountdownInPanel();
+            saveAutoState({ on: true, phase: "idle", submitAt: null, taskKey: null });
+            await sleep(1500);
             continue;
           }
-          saveAutoState({ on: true, phase: "idle" });
+          // 过期或不是本题 → 作废
+          log("旧倒计时作废（已过期或非本题），重新评分");
+          saveAutoState({ on: true, phase: "idle", submitAt: null, taskKey: null });
         }
 
-        const ok = await autoOneTask();
-        if (!_autoRunning) break;
-        if (!ok) {
-          log("本题流程未完全成功，进入下一题间隔");
-        }
-        // 已在倒计时里提交，这里只做短间隔再开下一题
+        const ok = await autoOneTask(myGen);
+        if (!_autoRunning || _autoGen !== myGen) break;
+        if (!ok) log("本题流程未完全成功，进入下一题");
         await sleep(2000);
-        if (!_autoRunning) break;
+        if (!_autoRunning || _autoGen !== myGen) break;
       } catch (e) {
         log("全自动异常：" + (e && e.message), "err");
         await stopAuto("执行异常：" + (e && e.message));
         break;
       }
-
-      const st3 = await loadAutoState();
-      if (!st3.on) break;
     }
     _autoRunning = false;
-    log("全自动循环结束");
+    log("自动循环结束 gen=" + myGen);
   }
 
-  async function startAuto() {
+  /** 只切换模式，不启动评分 */
+  async function setAutoMode(on) {
+    const prev = await loadAutoState();
+    saveAutoState({
+      on: !!on,
+      phase: on ? "idle" : "off",
+      startedAt: Date.now(),
+      batchSize: prev.batchSize || 3,
+    });
+    if (!on) {
+      _autoRunning = false;
+    }
+    log(on ? "自动模式=开（未启动，待点逐张/3张评）" : "自动模式=关");
+  }
+
+  /** 由「逐张/3张评」启动：真正跑起来 */
+  async function startAuto(batchSize) {
     await loadConfigFromStorage();
     if (!CFG.API_URL && !CFG.OPENAI_API_KEY) {
-      toastMsg("请先配置 API 再开全自动");
+      toastMsg("请先配置 API");
       throw new Error("未配置 API");
     }
-    saveAutoState({ on: true, startedAt: Date.now() });
+    const prev = await loadAutoState();
+    saveAutoState({
+      on: true,
+      phase: "running",
+      startedAt: Date.now(),
+      batchSize: batchSize || prev.batchSize || 3,
+    });
+    setAutoSwitchUI(true);
     _autoRunning = false; // allow loop
-    toastMsg("全自动已开启：约 6–8 分钟/题");
-    log("用户开启全自动模式", "ok");
+    toastMsg(`自动已启动（${batchSize || prev.batchSize || 3}张/批 · 倒计时后提交）`);
+    log("启动自动循环 batch=" + (batchSize || prev.batchSize || 3), "ok");
     autoLoop();
   }
 
@@ -1506,6 +1948,36 @@
     el._t = setTimeout(() => el.classList.remove("show"), 3200);
   }
 
+  /** 评完分提示音（Web Audio，无外部文件） */
+  function beepDone() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      const ctx = beepDone._ctx || (beepDone._ctx = new AC());
+      if (ctx.state === "suspended") ctx.resume();
+      const t = ctx.currentTime;
+      const play = (freq, start, dur, vol) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = "sine";
+        o.frequency.value = freq;
+        g.gain.setValueAtTime(0.0001, t + start);
+        g.gain.exponentialRampToValueAtTime(vol, t + start + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + start + dur);
+        o.connect(g);
+        g.connect(ctx.destination);
+        o.start(t + start);
+        o.stop(t + start + dur + 0.05);
+      };
+      // 两声轻响：叮-咚
+      play(880, 0, 0.18, 0.22);
+      play(1174.66, 0.22, 0.22, 0.2);
+      log("提示音：评分完成");
+    } catch (e) {
+      log("提示音失败(忽略)：" + (e && e.message));
+    }
+  }
+
   // ── 结果面板 ──
   function fmtDur(ms) {
     const s = Math.max(0, Math.round(ms / 1000));
@@ -1517,17 +1989,26 @@
   function updateCountdownInPanel(text, urgent) {
     let el = document.getElementById("siriser-countdown");
     if (!el) {
-      // 插到结果窗标题下方
-      const body = document.getElementById("siriser-result-body");
       const panel = document.getElementById("siriser-result");
       if (!panel) return;
+      const body = document.getElementById("siriser-result-body");
       if (!body) return;
       el = document.createElement("div");
       el.id = "siriser-countdown";
       panel.querySelector(".sir-r-h")?.insertAdjacentElement("afterend", el);
+      el.addEventListener("click", (e) => {
+        if (e.target.closest("[data-cd='cancel']")) {
+          _cancelSubmit = true;
+          log("用户取消倒计时提交");
+          clearCountdownInPanel();
+          toastMsg("已取消自动提交");
+          saveAutoState({ on: true, phase: "idle", batchSize: (CFG && CFG.AUTO_BATCH) || 3 });
+        }
+      });
     }
     el.innerHTML =
-      `<strong>倒计时提交</strong> <b class="sir-cd${urgent ? " urgent" : ""}">${escapeHtml(text)}</b>`;
+      `<strong>倒计时提交</strong> <b class="sir-cd${urgent ? " urgent" : ""}">${escapeHtml(text)}</b>` +
+      `<button type="button" class="sir-cd-btn" data-cd="cancel">取消提交</button>`;
     el.classList.add("show");
   }
 
@@ -1538,6 +2019,7 @@
 
   function showResultPanel(scores, report, clicked, meta) {
     const dur = meta && meta.elapsedMs != null ? fmtDur(meta.elapsedMs) : "—";
+    const clickDur = meta && meta.clickMs != null ? fmtDur(meta.clickMs) : "—";
     const mode = (meta && meta.batchSize) || 1;
     const modeLabel = mode >= 3 ? `${mode}张合评` : "逐张评";
     let panel = document.getElementById("siriser-result");
@@ -1567,7 +2049,7 @@
     const fmt = (v) => (v == null || v === "na" ? "无" : v);
     const taskCards = (window.__SIRISER_LAST_TASK__ && window.__SIRISER_LAST_TASK__._cards) || [];
     body.innerHTML =
-      `<div class="sir-r-sum">运行时间 <b class="sir-dur">${dur}</b> · ${modeLabel} · 勾选 ${clicked} 次 · 请对照左侧徽章</div>` +
+      `<div class="sir-r-sum">运行时间 <b class="sir-dur">${dur}</b> · 勾选耗时 <b class="sir-dur">${clickDur}</b> · ${modeLabel} · 勾选 ${clicked} 次 · 请对照左侧徽章</div>` +
       scores
         .map((s, i) => {
           const r = report[i] || { filled: [], miss: [] };
@@ -1750,6 +2232,47 @@
     return true;
   });
 
+  function setAutoSwitchUI(on) {
+    const sw = document.getElementById("siriser-auto-switch");
+    const lb = document.getElementById("siriser-auto-label");
+    if (sw) sw.classList.toggle("on", !!on);
+    if (lb) lb.textContent = on ? "已开启自动模式" : "已关闭自动模式";
+  }
+
+  const HUMAN_KEY = "SIRISER_HUMAN_CLICK";
+  function loadHumanMode() {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get([HUMAN_KEY], (r) => resolve(!!r[HUMAN_KEY]));
+      } catch (_) {
+        resolve(false);
+      }
+    });
+  }
+  function saveHumanMode(on) {
+    try {
+      chrome.storage.local.set({ [HUMAN_KEY]: !!on });
+    } catch (_) {}
+  }
+  function setHumanSwitchUI(on) {
+    const sw = document.getElementById("siriser-human-switch");
+    const lb = document.getElementById("siriser-human-label");
+    if (sw) sw.classList.toggle("on", !!on);
+    if (lb) lb.textContent = on ? "已开启拟人点击（2–4s/格）" : "已关闭拟人点击";
+  }
+
+  /** 拟人间隔：2–4 秒随机 */
+  async function humanClickDelay() {
+    const on = await loadHumanMode();
+    if (!on) {
+      await sleep(80);
+      return 80;
+    }
+    const ms = 2000 + Math.floor(Math.random() * 2001);
+    await sleep(ms);
+    return ms;
+  }
+
   // ── 悬浮球 ──
   function mountFab() {
     if (document.getElementById("siriser-root")) return;
@@ -1758,12 +2281,19 @@
     root.innerHTML = `
       <div id="siriser-menu" role="menu">
         <div class="sir-title">Siriser · 评分方式</div>
-        <button type="button" class="primary" data-act="auto-on">全自动模式（6–8分钟/题）</button>
-        <button type="button" data-act="auto-off">停止全自动</button>
+        <div class="sir-toggle-row" data-act="auto-toggle" role="button" tabindex="0" title="点击切换全自动">
+          <span class="sir-toggle-label" id="siriser-auto-label">已关闭自动模式</span>
+          <span class="sir-switch" id="siriser-auto-switch"><i></i></span>
+        </div>
+        <div class="sir-toggle-row" data-act="human-toggle" role="button" tabindex="0" title="每格间隔 2–4 秒随机点击">
+          <span class="sir-toggle-label" id="siriser-human-label">已关闭拟人点击</span>
+          <span class="sir-switch" id="siriser-human-switch"><i></i></span>
+        </div>
         <button type="button" data-act="eval-1">逐张评全部（稳 · 1张/次）</button>
         <button type="button" data-act="eval-3">3张合评全部（快 · 3张/次）</button>
         <button type="button" data-act="eval-one">只评当前模型</button>
         <div class="sir-title">工具</div>
+        <button type="button" data-act="stats">模型统计（史均/低分率）</button>
         <button type="button" data-act="fill-demo">自检勾选(全点1)</button>
         <button type="button" data-act="submit">提交当前题</button>
         <button type="button" data-act="map">对照预览(图↔模型)</button>
@@ -1776,15 +2306,21 @@
         <div class="sir-d-h"><span>诊断</span><button type="button" class="sir-close" data-act="close-diag" aria-label="关闭">×</button></div>
         <div class="sir-d-b" id="siriser-diag-body"></div>
       </div>
-      <div id="siriser-toast"></div>
       <button type="button" id="siriser-fab" title="Siriser">AI</button>`;
     document.body.appendChild(root);
+
+    // 提示条挂在 body 底部，不受悬浮球位置影响
+    let toastEl = document.getElementById("siriser-toast");
+    if (!toastEl) {
+      toastEl = document.createElement("div");
+      toastEl.id = "siriser-toast";
+      document.body.appendChild(toastEl);
+    }
 
     const fab = root.querySelector("#siriser-fab");
     const menu = root.querySelector("#siriser-menu");
     const diag = root.querySelector("#siriser-diag");
     const diagBody = root.querySelector("#siriser-diag-body");
-    const toastEl = root.querySelector("#siriser-toast");
 
     let dragging = false,
       moved = false,
@@ -1928,8 +2464,8 @@
     }
 
     menu.addEventListener("click", async (e) => {
-      const btn = e.target.closest("button[data-act]");
-      if (!btn || btn.disabled) return;
+      const btn = e.target.closest("[data-act]");
+      if (!btn || (btn.tagName === "BUTTON" && btn.disabled)) return;
       const act = btn.dataset.act;
 
       if (act === "map") {
@@ -1937,19 +2473,36 @@
         showMappingPreview();
         return;
       }
-      if (act === "auto-on") {
+      if (act === "human-toggle") {
+        menu.classList.remove("open");
+        const on = !(await loadHumanMode());
+        saveHumanMode(on);
+        setHumanSwitchUI(on);
+        toastMsg(on ? "已开启拟人点击：每格约 2–4 秒" : "已关闭拟人点击（瞬时点完）");
+        log("拟人点击=" + (on ? "开" : "关"));
+        return;
+      }
+      if (act === "auto-toggle") {
         menu.classList.remove("open");
         try {
-          await startAuto();
+          const st = await loadAutoState();
+          const on = !(st && st.on);
+          await setAutoMode(on);
+          setAutoSwitchUI(on);
+          toastMsg(
+            on
+              ? "已开启自动模式（开关）· 请点「逐张评 / 3张合评」启动"
+              : "已关闭自动模式"
+          );
         } catch (e) {
-          toastMsg("无法开启全自动：" + e.message);
+          setAutoSwitchUI(false);
+          toastMsg("自动模式：" + e.message);
         }
         return;
       }
-      if (act === "auto-off") {
+      if (act === "stats") {
         menu.classList.remove("open");
-        await stopAuto("用户手动停止");
-        toastMsg("全自动已停止");
+        await showStatsPanel();
         return;
       }
       if (act === "diag") {
@@ -2017,6 +2570,15 @@
         }
         const onlyCurrent = act === "eval-one";
         const batchSize = act === "eval-3" ? 3 : 1;
+
+        // 自动模式只作开关；这里才是启动
+        const autoSt = await loadAutoState();
+        if (autoSt && autoSt.on && !onlyCurrent) {
+          setBusy(false, "自动已启动");
+          await startAuto(batchSize);
+          return;
+        }
+
         await runAutoScore(onlyCurrent, { batchSize });
         setBusy(false, "已勾选，请看结果面板");
         log("完成", "ok");
@@ -2040,6 +2602,10 @@
       if (e.target.closest('[data-act="close-diag"]')) diag.classList.remove("open");
     });
 
+    // 初始化开关状态
+    loadAutoState().then((st) => setAutoSwitchUI(!!(st && st.on)));
+    loadHumanMode().then((on) => setHumanSwitchUI(on));
+
     document.addEventListener(
       "pointerdown",
       (e) => {
@@ -2058,8 +2624,8 @@
     document.addEventListener("DOMContentLoaded", () => {
       loadConfigFromStorage().then(mountFab).then(() => {
         loadAutoState().then((st) => {
-          if (st && st.on) {
-            log("检测到全自动开关=开，续跑");
+          if (st && st.on && (st.phase === "running" || st.phase === "countdown")) {
+            log("自动进行中，续跑 phase=" + st.phase);
             autoLoop();
           }
         });
@@ -2070,8 +2636,8 @@
       .then(mountFab)
       .then(() =>
         loadAutoState().then((st) => {
-          if (st && st.on) {
-            log("检测到全自动开关=开，续跑");
+          if (st && st.on && (st.phase === "running" || st.phase === "countdown")) {
+            log("自动进行中，续跑 phase=" + st.phase);
             autoLoop();
           }
         })

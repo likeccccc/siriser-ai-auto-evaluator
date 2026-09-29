@@ -60,6 +60,52 @@
   color: #6b7a85;
   padding: 4px 8px 2px;
 }
+#siriser-menu .sir-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid #d5dde3;
+  border-radius: 8px;
+  background: #f7f9fa;
+  cursor: pointer;
+  user-select: none;
+}
+#siriser-menu .sir-toggle-row:hover {
+  border-color: #0f766e;
+}
+#siriser-menu .sir-toggle-label {
+  font: 600 12px/1.2 system-ui, sans-serif;
+  color: #1c2329;
+}
+#siriser-menu .sir-switch {
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  background: #c5d0d6;
+  position: relative;
+  flex-shrink: 0;
+  transition: background 0.18s;
+}
+#siriser-menu .sir-switch i {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 0.18s;
+}
+#siriser-menu .sir-switch.on {
+  background: #0f766e;
+}
+#siriser-menu .sir-switch.on i {
+  transform: translateX(20px);
+}
 #siriser-menu button {
   display: flex;
   align-items: center;
@@ -373,10 +419,121 @@
 #siriser-countdown .sir-cd.urgent {
   color: #c2410c;
 }
+#siriser-countdown {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+#siriser-countdown.show { display: flex; }
+#siriser-countdown .sir-cd-btn {
+  margin-left: auto;
+  border: 1px solid #d5dde3;
+  background: #fff;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font: 600 11px system-ui, sans-serif;
+  cursor: pointer;
+  color: #c2410c;
+}
+#siriser-countdown .sir-cd-btn:hover {
+  border-color: #c2410c;
+  background: #fff1e8;
+}
 #siriser-result .sir-r-sum {
   font-size: 11px;
   color: #6b7a85;
   margin-bottom: 8px;
+}
+#siriser-stats-panel {
+  pointer-events: auto;
+  position: fixed;
+  right: 18px;
+  top: 64px;
+  width: min(420px, calc(100vw - 24px));
+  max-height: min(70vh, 560px);
+  display: none;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  z-index: 2147483646;
+  background: #fff;
+  color: #1c2329;
+  border: 1px solid #d5dde3;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+}
+#siriser-stats-panel.open { display: flex; }
+#siriser-stats-panel .sir-r-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  background: #f0f3f5;
+  border-bottom: 1px solid #d5dde3;
+  cursor: grab;
+}
+#siriser-stats-panel .sir-r-acts { display: flex; gap: 6px; }
+#siriser-stats-panel .sir-r-acts button {
+  border: 1px solid #d5dde3;
+  background: #fff;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: 600 11px system-ui, sans-serif;
+  cursor: pointer;
+}
+#siriser-stats-panel .sir-r-b {
+  padding: 10px 12px 14px;
+  overflow: auto;
+}
+#siriser-stats-panel .sir-st-head,
+#siriser-stats-panel .sir-st-row2 {
+  display: grid;
+  grid-template-columns: 48px 56px 72px 72px 72px;
+  gap: 4px;
+  padding: 6px 4px;
+  font-size: 12px;
+  align-items: center;
+}
+#siriser-stats-panel .sir-st-head {
+  color: #6b7a85;
+  font-size: 11px;
+  border-bottom: 1px solid #d5dde3;
+}
+#siriser-stats-panel .sir-st-row2 b {
+  font: 700 12px Consolas, monospace;
+  color: #0f766e;
+}
+#siriser-stats-panel .sir-st-empty {
+  color: #6b7a85;
+  font-size: 12px;
+  padding: 20px 8px;
+  text-align: center;
+}
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #d5dde3;
+  font-size: 11px;
+  color: #6b7a85;
+}
+#siriser-stats .sir-st-sum {
+  margin-bottom: 6px;
+  color: #1c2329;
+}
+#siriser-stats .sir-st-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid #eef2f4;
+}
+#siriser-stats .sir-st-row b {
+  width: 22px;
+  font: 700 11px Consolas, monospace;
+  color: #0f766e;
+}
+#siriser-stats .err {
+  color: #c2410c;
 }
 #siriser-result .sir-dur {
   color: #0f766e;
@@ -411,22 +568,28 @@
 
 #siriser-toast {
   pointer-events: none;
-  position: absolute;
-  right: 0;
-  bottom: 62px;
-  max-width: 280px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: #1c2329;
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%) translateY(12px);
+  min-width: min(420px, 86vw);
+  max-width: min(640px, 92vw);
+  padding: 12px 20px;
+  border-radius: 12px;
+  background: rgba(28, 35, 41, 0.94);
   color: #fff;
-  font-size: 12px;
+  font: 500 13px/1.5 system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  text-align: center;
+  white-space: normal;
+  word-break: break-word;
   opacity: 0;
-  transform: translateY(6px);
-  transition: opacity 0.2s, transform 0.2s;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  z-index: 2147483647;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
 }
 #siriser-toast.show {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateX(-50%) translateY(0);
 }
 
 .siriser-picked {

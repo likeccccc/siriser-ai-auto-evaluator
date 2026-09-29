@@ -14,6 +14,17 @@ window.SIRISER_CONFIG = {
   DUAL_DIFF_THRESHOLD: 2,
   /** 每批评分的模型数：1 更稳（避免串图），2 更快 */
   BATCH_SIZE: 1,
+  /**
+   * 模型基础先验（史均不足时的默认期望）
+   * 观察：A–D 往往更好，往后逐级略降
+   */
+  MODEL_PRIOR: {
+    A: 8.2, B: 8.0, C: 7.8, D: 7.6,
+    E: 7.2, F: 7.0, G: 6.8, H: 6.6,
+    J: 6.4, K: 6.2, L: 6.0, M: 5.8,
+    N: 5.6, O: 5.4, P: 5.2,
+    Q: 5.0, R: 4.8, S: 4.6,
+  },
   AUTO_SUBMIT: false,
   AUTO_NEXT: false,
   /** 单次 API 超时（ms）。通义偶发很慢，给到 5 分钟 */

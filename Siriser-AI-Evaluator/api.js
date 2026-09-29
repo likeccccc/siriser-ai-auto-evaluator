@@ -290,7 +290,8 @@
         `模型列表：${models.map((m) => m.id).join(", ")}\n\n` +
         `【强制】不同模型必须给出不同分数向量，禁止复制粘贴同一套分。\n` +
         `每个模型的 notes 必须写出该图特有的一条问题（位置+现象），与其他模型不得相同。\n` +
-        `若两图都挺好，也要通过「哪张更好」拉开至少 1 分差距。`,
+        `若两图都挺好，也要通过「哪张更好」拉开至少 1 分差距。` +
+        (task.histHint || ""),
     });
 
     (task.referenceImages || []).forEach((src, i) => {
@@ -591,6 +592,55 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     return { merged, needReview };
   }
 
+  /** 规则审核：A–D 过低、P–S 过高 */
+  const POLICY_LOW = { A: 1, B: 1, C: 1, D: 1 };
+  const POLICY_HIGH = { P: 1, Q: 1, R: 1, S: 1 };
+
+  function avgScore(s) {
+    const v = DIM_KEYS.map((k) => s[k]).filter((x) => typeof x === "number");
+    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+  }
+
+  function pickPolicyReview(items) {
+    return items.filter((s) => {
+      const avg = avgScore(s);
+      if (avg == null) return false;
+      const id = String(s.model || "").toUpperCase();
+      if (POLICY_LOW[id] && avg < 5) {
+        s._policy = `规则审核:${id}均分${avg.toFixed(1)}<5`;
+        return true;
+      }
+      if (POLICY_HIGH[id] && avg >= 9) {
+        s._policy = `规则审核:${id}均分${avg.toFixed(1)}≥9`;
+        return true;
+      }
+      return false;
+    });
+  }
+
+  async function applyPolicyReview(cleanTask, scores, cfg) {
+    const hit = pickPolicyReview(scores);
+    if (!hit.length) return scores;
+    slog(`规则审核触发 ${hit.map((h) => h.model + " " + h._policy).join(" | ")}`);
+    const revModel = String(cfg.OPENAI_MODEL_REVIEW || "").trim();
+    if (!revModel) {
+      hit.forEach((h) => {
+        h.notes = ((h.notes || "") + " ⚠" + h._policy + "(无审核模型)").trim();
+      });
+      return scores;
+    }
+    const reviewed = await reviewScores(cleanTask, hit, cfg);
+    const map = new Map(reviewed.map((s) => [s.model, s]));
+    return scores.map((s) => {
+      const r = map.get(s.model);
+      if (!r) return s;
+      return {
+        ...r,
+        notes: ((r.notes || "") + " ⚠已规则审核").trim(),
+      };
+    });
+  }
+
   /** 分差大时：审核模型在两套分里裁决 */
   async function reviewScores(cleanTask, items, cfg) {
     const revModel = cfg.OPENAI_MODEL_REVIEW;
@@ -782,15 +832,16 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         const scoresB = await scoreAllWithModel(cleanTask, cfg, modelB);
         const { merged, needReview } = mergeDualScores(scoresA, scoresB, threshold);
         slog(`双模型合并：待审 ${needReview.length} 个 / 阈值 ${threshold}`);
+        let final = merged;
         if (needReview.length && modelR) {
           const reviewed = await reviewScores(cleanTask, needReview, cfg);
           const revMap = new Map(reviewed.map((s) => [s.model, s]));
-          return rankSpreadScores(merged.map((m) => revMap.get(m.model) || m));
+          final = merged.map((m) => revMap.get(m.model) || m);
         }
-        return rankSpreadScores(merged);
+        return await applyPolicyReview(cleanTask, final, cfg);
       }
 
-      return rankSpreadScores(scoresA);
+      return await applyPolicyReview(cleanTask, scoresA, cfg);
     }
 
     throw new Error("未配置 API_URL 或 OPENAI_API_KEY");
