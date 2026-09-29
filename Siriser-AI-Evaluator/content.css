@@ -355,6 +355,24 @@
   overflow: auto;
   max-height: 340px;
 }
+#siriser-countdown {
+  display: none;
+  margin: 0 12px 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #e6f3f1;
+  border: 1px solid #b7d9d5;
+  color: #0b5c56;
+  font-size: 12px;
+}
+#siriser-countdown.show { display: block; }
+#siriser-countdown .sir-cd {
+  font: 700 16px Consolas, monospace;
+  margin-left: 6px;
+}
+#siriser-countdown .sir-cd.urgent {
+  color: #c2410c;
+}
 #siriser-result .sir-r-sum {
   font-size: 11px;
   color: #6b7a85;

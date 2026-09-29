@@ -292,11 +292,39 @@
     const h = im.naturalHeight || im.height || 0;
     const src = (im.currentSrc || im.src || "").toLowerCase();
     const alt = (im.alt || "").toLowerCase();
-    // 站点加载失败占位：例如 100×21 的 "Could not process..."
+    // 未加载完 / 加载失败占位
     if (w < 80 || h < 80) return false;
     if (/could not|error|placeholder|broken|fail/i.test(src + " " + alt)) return false;
     if (/logo|icon|avatar|spinner/i.test(alt + " " + (im.className || ""))) return false;
     return true;
+  }
+
+  /** 换题后图片可能未加载完（0×0）；等到有尺寸再采集 */
+  async function waitForImagesReady(timeoutMs) {
+    const t0 = Date.now();
+    const limit = timeoutMs || 15000;
+    for (;;) {
+      const labels = findModelLabels();
+      let ready = 0;
+      let total = labels.length || 1;
+      labels.forEach(({ el }) => {
+        const card = resolveModelCard(el);
+        const img = pickLargestImg(card);
+        const w = img && (img.naturalWidth || img.width || 0);
+        if (img && w >= 80) ready += 1;
+      });
+      // 也可看页面上大图数量
+      const bigImgs = qa("img").filter(isRealGenImg).length;
+      if (labels.length && ready >= labels.length) {
+        log(`图片就绪 ${ready}/${labels.length}`);
+        return true;
+      }
+      if (Date.now() - t0 > limit) {
+        log(`等图超时 ready=${ready}/${total} bigImgs=${bigImgs}`, "err");
+        return false;
+      }
+      await sleep(500);
+    }
   }
 
   function imgNear(labelEl) {
@@ -1282,13 +1310,230 @@
     return scores;
   }
 
+  // ── 全自动模式 ──
+  const AUTO_KEY = "SIRISER_AUTO";
+  let _autoRunning = false;
+
+  function loadAutoState() {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get([AUTO_KEY], (r) => resolve(r[AUTO_KEY] || { on: false }));
+      } catch (_) {
+        resolve({ on: false });
+      }
+    });
+  }
+  function saveAutoState(st) {
+    try {
+      chrome.storage.local.set({ [AUTO_KEY]: st });
+    } catch (_) {}
+  }
+
+  function missingScoreIds(scores) {
+    return (scores || [])
+      .filter((s) => {
+        if (s._skipClick) return true;
+        if (s.notes === "no_image") return false;
+        return DIMS.every((k) => s[k] == null || s[k] === "na");
+      })
+      .map((s) => s.model);
+  }
+
+  /** 本地是否算「有可用图」：排除 0×0 / 未加载 */
+  function hasUsableImage(card) {
+    if (!card) return false;
+    if (card.imgEl && isRealGenImg(card.imgEl)) return true;
+    if (card.images && card.images.length) {
+      // data URL 或 http 都算有，但空串不算
+      return card.images.some((x) => x && String(x).length > 80);
+    }
+    return false;
+  }
+
+  async function stopAuto(reason) {
+    _autoRunning = false;
+    saveAutoState({ on: false, reason: reason || "stopped", at: Date.now() });
+    log("全自动停止：" + (reason || ""), "err");
+    try {
+      alert("Siriser 全自动已停止：\n" + (reason || "异常"));
+    } catch (_) {}
+  }
+
+  async function autoOneTask() {
+    // 换题后图可能还没加载（0×0 → 压成 3KB → API 无分）
+    await waitForImagesReady(20000);
+    await sleep(800);
+
+    // 1) 评分；缺分重试最多 2 次（共 3 轮）
+    let scores = null;
+    let missing = [];
+    let retries = 0;
+    for (;;) {
+      if (retries > 0) {
+        await waitForImagesReady(10000);
+        await sleep(600);
+      }
+      scores = await runAutoScore(false, { batchSize: Number(CFG.AUTO_BATCH) || 3 });
+      missing = missingScoreIds(scores);
+      if (!missing.length) {
+        log("全自动：分数齐全", "ok");
+        break;
+      }
+      retries += 1;
+      log(`全自动：缺分 ${missing.join(",")} → 重评 ${retries}/2`, "err");
+      if (retries >= 2) {
+        clearCountdownInPanel();
+        await stopAuto(`连续 2 次重评仍缺分：${missing.join(",")}`);
+        return false;
+      }
+      await sleep(2500);
+    }
+
+    // 2) 结果窗倒计时，到点再提交（让操作者能看到何时提交）
+    const wait = randDelayMs();
+    const deadline = Date.now() + wait;
+    saveAutoState({ on: true, phase: "countdown", submitAt: deadline });
+    log(`全自动：${fmtDur(wait)} 后提交（结果窗倒计时）`);
+
+    while (Date.now() < deadline) {
+      const st = await loadAutoState();
+      if (!st.on) {
+        clearCountdownInPanel();
+        return false;
+      }
+      const left = deadline - Date.now();
+      updateCountdownInPanel(
+        `${fmtDur(left)} 后自动提交`,
+        left < 30 * 1000
+      );
+      await sleep(1000);
+    }
+
+    updateCountdownInPanel("正在提交…", true);
+    const ok = submitAndNext();
+    clearCountdownInPanel();
+    if (!ok) log("全自动：提交按钮未找到", "err");
+    else log("全自动：已提交", "ok");
+    return ok;
+  }
+
+  function randDelayMs() {
+    // 6–8 分钟
+    return 6 * 60 * 1000 + Math.floor(Math.random() * 2 * 60 * 1000);
+  }
+
+  async function autoLoop() {
+    if (_autoRunning) return;
+    const st = await loadAutoState();
+    if (!st.on) return;
+    _autoRunning = true;
+    log("全自动循环启动");
+
+    while (_autoRunning) {
+      const st2 = await loadAutoState();
+      if (!st2.on) break;
+      try {
+        // 上一题若已在倒计时提交阶段（刷新恢复），不要再评分，直接等提交
+        if (st2.phase === "countdown" && st2.submitAt) {
+          const left = st2.submitAt - Date.now();
+          if (left > 0) {
+            log(`续跑：恢复倒计时 ${fmtDur(left)}`);
+            const deadline = st2.submitAt;
+            while (Date.now() < deadline) {
+              const stc = await loadAutoState();
+              if (!stc.on) break;
+              updateCountdownInPanel(
+                `${fmtDur(deadline - Date.now())} 后自动提交`,
+                deadline - Date.now() < 30000
+              );
+              await sleep(1000);
+            }
+            updateCountdownInPanel("正在提交…", true);
+            submitAndNext();
+            clearCountdownInPanel();
+            saveAutoState({ on: true, phase: "idle" });
+            await sleep(randDelayMs());
+            continue;
+          }
+          saveAutoState({ on: true, phase: "idle" });
+        }
+
+        const ok = await autoOneTask();
+        if (!_autoRunning) break;
+        if (!ok) {
+          log("本题流程未完全成功，进入下一题间隔");
+        }
+        // 已在倒计时里提交，这里只做短间隔再开下一题
+        await sleep(2000);
+        if (!_autoRunning) break;
+      } catch (e) {
+        log("全自动异常：" + (e && e.message), "err");
+        await stopAuto("执行异常：" + (e && e.message));
+        break;
+      }
+
+      const st3 = await loadAutoState();
+      if (!st3.on) break;
+    }
+    _autoRunning = false;
+    log("全自动循环结束");
+  }
+
+  async function startAuto() {
+    await loadConfigFromStorage();
+    if (!CFG.API_URL && !CFG.OPENAI_API_KEY) {
+      toastMsg("请先配置 API 再开全自动");
+      throw new Error("未配置 API");
+    }
+    saveAutoState({ on: true, startedAt: Date.now() });
+    _autoRunning = false; // allow loop
+    toastMsg("全自动已开启：约 6–8 分钟/题");
+    log("用户开启全自动模式", "ok");
+    autoLoop();
+  }
+
+  function toastMsg(msg) {
+    const el = document.getElementById("siriser-toast");
+    if (!el) {
+      try {
+        alert(msg);
+      } catch (_) {}
+      return;
+    }
+    el.textContent = msg;
+    el.classList.add("show");
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove("show"), 3200);
+  }
+
   // ── 结果面板 ──
   function fmtDur(ms) {
-    const s = Math.max(0, Math.round(ms / 100) / 10);
-    if (s < 60) return s.toFixed(1) + " 秒";
+    const s = Math.max(0, Math.round(ms / 1000));
     const m = Math.floor(s / 60);
-    const r = Math.round(s % 60);
-    return m + " 分 " + r + " 秒";
+    const r = s % 60;
+    return m > 0 ? `${m}:${String(r).padStart(2, "0")}` : `${r}s`;
+  }
+
+  function updateCountdownInPanel(text, urgent) {
+    let el = document.getElementById("siriser-countdown");
+    if (!el) {
+      // 插到结果窗标题下方
+      const body = document.getElementById("siriser-result-body");
+      const panel = document.getElementById("siriser-result");
+      if (!panel) return;
+      if (!body) return;
+      el = document.createElement("div");
+      el.id = "siriser-countdown";
+      panel.querySelector(".sir-r-h")?.insertAdjacentElement("afterend", el);
+    }
+    el.innerHTML =
+      `<strong>倒计时提交</strong> <b class="sir-cd${urgent ? " urgent" : ""}">${escapeHtml(text)}</b>`;
+    el.classList.add("show");
+  }
+
+  function clearCountdownInPanel() {
+    const el = document.getElementById("siriser-countdown");
+    if (el) el.classList.remove("show");
   }
 
   function showResultPanel(scores, report, clicked, meta) {
@@ -1513,7 +1758,9 @@
     root.innerHTML = `
       <div id="siriser-menu" role="menu">
         <div class="sir-title">Siriser · 评分方式</div>
-        <button type="button" class="primary" data-act="eval-1">逐张评全部（稳 · 1张/次）</button>
+        <button type="button" class="primary" data-act="auto-on">全自动模式（6–8分钟/题）</button>
+        <button type="button" data-act="auto-off">停止全自动</button>
+        <button type="button" data-act="eval-1">逐张评全部（稳 · 1张/次）</button>
         <button type="button" data-act="eval-3">3张合评全部（快 · 3张/次）</button>
         <button type="button" data-act="eval-one">只评当前模型</button>
         <div class="sir-title">工具</div>
@@ -1690,6 +1937,21 @@
         showMappingPreview();
         return;
       }
+      if (act === "auto-on") {
+        menu.classList.remove("open");
+        try {
+          await startAuto();
+        } catch (e) {
+          toastMsg("无法开启全自动：" + e.message);
+        }
+        return;
+      }
+      if (act === "auto-off") {
+        menu.classList.remove("open");
+        await stopAuto("用户手动停止");
+        toastMsg("全自动已停止");
+        return;
+      }
       if (act === "diag") {
         const d = diagnose();
         diagBody.innerHTML = d.html;
@@ -1794,9 +2056,25 @@
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", () => {
-      loadConfigFromStorage().then(mountFab);
+      loadConfigFromStorage().then(mountFab).then(() => {
+        loadAutoState().then((st) => {
+          if (st && st.on) {
+            log("检测到全自动开关=开，续跑");
+            autoLoop();
+          }
+        });
+      });
     });
   } else {
-    loadConfigFromStorage().then(mountFab);
+    loadConfigFromStorage()
+      .then(mountFab)
+      .then(() =>
+        loadAutoState().then((st) => {
+          if (st && st.on) {
+            log("检测到全自动开关=开，续跑");
+            autoLoop();
+          }
+        })
+      );
   }
 })();

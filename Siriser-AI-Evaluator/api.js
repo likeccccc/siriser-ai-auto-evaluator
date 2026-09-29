@@ -313,10 +313,21 @@
 
   /** 评分用精简 system，降低延迟（细则要点保留） */
   const SHORT_SYSTEM = `你是 Edit Bench 图片编辑评测专家。对比「编辑指令 + 参考图 + 生成图」给 5 个整数分 1–10：
-alignment 指令遵循, quality 局部质量, preservation 非编辑保持, consistency 全局一致, realism 真实美学。
-只给 JSON {"scores":[{"model","alignment","quality","preservation","consistency","realism","notes"}]}。
-无图五项 null 且 notes="no_image"。从严：10 极少；有可见瑕疵最高 8；禁止五维同分。
-若一次评多个模型：必须拉开相对差距，禁止人人同一套高分。notes≤30字写该图特有问题。`;
+alignment 指令遵循, quality 局部质量, preservation 非编辑保持, consistency 全局一致, realism 真实感与美学。
+
+【realism 专条 · 严查 AI 感】只要出现下列任一，realism 最高 7；两项以上或很明显 ≤5：
+- 光照不自然：光影方向矛盾、假高光、塑料反光、过曝/欠曝、色温漂移
+- 过度磨皮/塑料皮肤/蜡像感、皮肤纹理消失、五官柔糊
+- 发丝粘成块、边缘光晕、背景涂抹、细节涂抹感
+- 明显生成伪影：多余手指、文字乱码、结构扭曲、重影、噪点块
+- 整体「一眼 AI」：电影感假、味精色、无真实摄影颗粒
+写实人像/街拍以真实摄影为准；插画/动漫不按照片扣，但仍扣「风格内假光影/糊脸」。
+
+其余四维：10 极少；有可见瑕疵最高 8；禁止五维同分；无图五项 null 且 notes="no_image"。
+notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛盾）。
+
+只输出 JSON：
+{"scores":[{"model","alignment","quality","preservation","consistency","realism","notes"}]}`;
 
   async function callOpenAIBatch(task, models, cfg, userPartsOverride) {
     const base = (cfg.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
