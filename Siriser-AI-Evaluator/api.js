@@ -276,7 +276,28 @@
   }
 
   function imgPart(src) {
-    return { type: "image_url", image_url: { url: src } };
+    if (!src) return null;
+    const url = typeof src === "string" ? src : src && src.url;
+    if (!url) return null;
+    return { type: "image_url", image_url: { url: url } };
+  }
+
+  function sanitizeParts(parts) {
+    return (parts || [])
+      .map((p) => {
+        if (!p || typeof p !== "object") return null;
+        if (p.type === "text") return { type: "text", text: String(p.text || "") };
+        if (p.type === "image_url") {
+          const url =
+            typeof p.image_url === "string"
+              ? p.image_url
+              : p.image_url && p.image_url.url;
+          if (!url) return null;
+          return { type: "image_url", image_url: { url: url } };
+        }
+        return null;
+      })
+      .filter(Boolean);
   }
 
   function buildOpenAIUserContent(systemPrompt, task, models) {
@@ -296,7 +317,8 @@
 
     (task.referenceImages || []).forEach((src, i) => {
       parts.push({ type: "text", text: `reference[${i}]：` });
-      parts.push(imgPart(src));
+      const im = imgPart(src);
+      if (im) parts.push(im);
     });
 
     models.forEach((m) => {
@@ -306,10 +328,11 @@
       }
       (m.images || []).forEach((src, i) => {
         parts.push({ type: "text", text: `【model=${m.id}】image[${i}]：` });
-        parts.push(imgPart(src));
+        const im = imgPart(src);
+        if (im) parts.push(im);
       });
     });
-    return parts;
+    return sanitizeParts(parts);
   }
 
   /** 评分用精简 system，降低延迟（细则要点保留） */
@@ -332,9 +355,9 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
 
   async function callOpenAIBatch(task, models, cfg, userPartsOverride) {
     const base = (cfg.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
-    const content =
-        userPartsOverride ||
-        buildOpenAIUserContent(SHORT_SYSTEM, task, models);
+    let content = sanitizeParts(
+      userPartsOverride || buildOpenAIUserContent(SHORT_SYSTEM, task, models)
+    );
     const modelName = cfg.OPENAI_MODEL || "gpt-4o-mini";
     const t0 = Date.now();
 
@@ -393,11 +416,28 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
 
     if (res.status === 400) {
       const errText = await res.text().catch(() => "");
-      slog("HTTP400 " + errText.slice(0, 120));
+      slog("HTTP400 " + errText.slice(0, 140));
       delete body.response_format;
       delete body.enable_thinking;
       delete body.thinking;
-      res = await doPost(body);
+      // Unexpected item type：该模型可能不收 image_url，改成纯文本重试
+      if (/unexpected item type|invalid.*content/i.test(errText)) {
+        slog("该模型拒收多模态 parts，改纯文本重试");
+        const textOnly = sanitizeParts(content).filter((p) => p.type === "text");
+        body.messages = [
+          {
+            role: "system",
+            content: global.SCORING_SYSTEM_PROMPT || SHORT_SYSTEM,
+          },
+          {
+            role: "user",
+            content: textOnly.map((p) => p.text).join("\n") + "\n（图片未随请求，若无法判断请按 notes=no_image）",
+          },
+        ];
+        res = await doPost(body);
+      } else {
+        res = await doPost(body);
+      }
       if (!res.ok) {
         const t2 = await res.text().catch(() => "");
         throw new Error("OpenAI HTTP " + res.status + " " + t2.slice(0, 400));
@@ -838,10 +878,13 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
           const revMap = new Map(reviewed.map((s) => [s.model, s]));
           final = merged.map((m) => revMap.get(m.model) || m);
         }
-        return await applyPolicyReview(cleanTask, final, cfg);
+        const reviewed2 = await applyPolicyReview(cleanTask, final, cfg);
+        // 保序拉开，避免人人 9/8/9/8/7
+        return rankSpreadScores(reviewed2);
       }
 
-      return await applyPolicyReview(cleanTask, scoresA, cfg);
+      const reviewed3 = await applyPolicyReview(cleanTask, scoresA, cfg);
+      return rankSpreadScores(reviewed3);
     }
 
     throw new Error("未配置 API_URL 或 OPENAI_API_KEY");

@@ -249,5 +249,4 @@ $("btnOpenWorkbench").addEventListener("click", async () => {
   }
 });
 
-// 点扩展图标即跳转标注页（首次打开 popup 时）
-openWorkbench().catch(() => {});
+// 仅点击「打开标注工作台」时跳转，打开弹窗不再自动跳

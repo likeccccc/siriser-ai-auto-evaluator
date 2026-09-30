@@ -2280,8 +2280,8 @@
     root.id = "siriser-root";
     root.innerHTML = `
       <div id="siriser-menu" role="menu">
-        <div class="sir-title">Siriser · 评分方式</div>
-        <div class="sir-toggle-row" data-act="auto-toggle" role="button" tabindex="0" title="点击切换全自动">
+        <div class="sir-title">Siriser · 评分</div>
+        <div class="sir-toggle-row" data-act="auto-toggle" role="button" tabindex="0" title="模式开关；点「逐张/3张」才启动">
           <span class="sir-toggle-label" id="siriser-auto-label">已关闭自动模式</span>
           <span class="sir-switch" id="siriser-auto-switch"><i></i></span>
         </div>
@@ -2289,18 +2289,17 @@
           <span class="sir-toggle-label" id="siriser-human-label">已关闭拟人点击</span>
           <span class="sir-switch" id="siriser-human-switch"><i></i></span>
         </div>
-        <button type="button" data-act="eval-1">逐张评全部（稳 · 1张/次）</button>
-        <button type="button" data-act="eval-3">3张合评全部（快 · 3张/次）</button>
-        <button type="button" data-act="eval-one">只评当前模型</button>
+        <button type="button" class="primary" data-act="eval-1"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h7"/></svg>逐张评全部</button>
+        <button type="button" class="primary" data-act="eval-3"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="7" height="7" rx="1.5"/><rect x="14" y="4" width="7" height="7" rx="1.5"/><rect x="3" y="13" width="7" height="7" rx="1.5"/></svg>3张合评全部</button>
+        <button type="button" data-act="eval-one"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.2"/><path d="M5 19c1.5-3.5 4-5 7-5s5.5 1.5 7 5"/></svg>只评当前模型</button>
         <div class="sir-title">工具</div>
-        <button type="button" data-act="stats">模型统计（史均/低分率）</button>
-        <button type="button" data-act="fill-demo">自检勾选(全点1)</button>
-        <button type="button" data-act="submit">提交当前题</button>
-        <button type="button" data-act="map">对照预览(图↔模型)</button>
-        <button type="button" data-act="diag">诊断识别</button>
-        <button type="button" data-act="copy">复制结构摘要</button>
-        <button type="button" data-act="copy-logs">复制运行日志</button>
-        <div class="sir-hint">拖动球移动 · 点击展开<br/>稳=串图少；快=可能偶发抄分</div>
+        <button type="button" data-act="map"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="8" height="8" rx="1.5"/><rect x="13" y="5" width="8" height="8" rx="1.5"/><rect x="3" y="15" width="8" height="5" rx="1.5"/></svg>对照预览</button>
+        <button type="button" data-act="stats"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V10M12 19V5M19 19v-7"/></svg>模型统计</button>
+        <button type="button" data-act="fill-demo"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l4 4L20 6"/></svg>自检勾选</button>
+        <button type="button" data-act="submit"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>提交当前题</button>
+        <button type="button" data-act="diag"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M20 20l-3.5-3.5"/></svg>诊断识别</button>
+        <button type="button" data-act="copy-logs"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="4" width="12" height="14" rx="2"/><path d="M6 8H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-1"/></svg>复制运行日志</button>
+        <div class="sir-hint">拖动球移动 · 点击展开<br/>开关≠启动，点评分按钮才开跑</div>
       </div>
       <div id="siriser-diag" role="dialog">
         <div class="sir-d-h"><span>诊断</span><button type="button" class="sir-close" data-act="close-diag" aria-label="关闭">×</button></div>
