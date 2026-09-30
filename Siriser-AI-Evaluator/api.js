@@ -392,16 +392,13 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         { role: "user", content },
       ],
     };
-    // Qwen3 thinking 模型默认会「想」很久；评分任务必须关思考
+    // 仅在模型名含 thinking 时尝试关思考；禁止默认关（有的模型强制 True）
     const isThinkingName = /thinking/i.test(modelName);
-    if (/qwen3|thinking/i.test(modelName)) {
+    if (isThinkingName) {
       body.enable_thinking = false;
       body.thinking = { type: "disabled" };
-      // 部分网关要放在 extra_body
       body.extra_body = { enable_thinking: false };
-    }
-    if (isThinkingName) {
-      slog("警告：模型名含 thinking，已强制 enable_thinking=false；建议改用 …-instruct");
+      slog("警告：模型名含 thinking，已尝试 enable_thinking=false");
     }
     // thinking / 部分端点不认 response_format，先不带，更快
     if (!/qwen3|thinking/i.test(modelName)) {
@@ -443,6 +440,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       delete body.response_format;
       delete body.enable_thinking;
       delete body.thinking;
+      delete body.extra_body;
       // Unexpected item type：该模型可能不收 image_url，改成纯文本重试
       if (/unexpected item type|invalid.*content/i.test(errText)) {
         slog("该模型拒收多模态 parts，改纯文本重试");
@@ -457,6 +455,10 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
             content: textOnly.map((p) => p.text).join("\n") + "\n（图片未随请求，若无法判断请按 notes=no_image）",
           },
         ];
+        res = await doPost(body);
+      } else if (/enable_thinking|thinking parameter/i.test(errText)) {
+        // 有的模型强制 thinking=True，去掉参数再试
+        slog("该模型强制 enable_thinking，去掉参数重试");
         res = await doPost(body);
       } else {
         res = await doPost(body);

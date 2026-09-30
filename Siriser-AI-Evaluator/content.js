@@ -114,12 +114,11 @@
 
   function fireClick(el) {
     if (!el) return false;
-    // Ant Design：点 label / .ant-radio 才会选中；点隐藏 input 无效
+    // Ant Design：优先点 label.ant-radio-wrapper
     let target = el;
     if (el.tagName === "INPUT") {
       target =
         el.closest("label.ant-radio-wrapper, label.ant-checkbox-wrapper, label") ||
-        el.closest(".ant-radio, .ant-checkbox") ||
         el.parentElement ||
         el;
     } else {
@@ -134,36 +133,24 @@
       target.querySelector?.('input[type="radio"], input[type="checkbox"]') ||
       (target.tagName === "INPUT" ? target : null);
 
-    try {
-      if (typeof target.focus === "function") target.focus();
-    } catch (_) {}
-    const opts = { bubbles: true, cancelable: true, view: window, composed: true };
-    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-      try {
-        if (type.startsWith("pointer") && window.PointerEvent) {
-          target.dispatchEvent(
-            new PointerEvent(type, { ...opts, pointerId: 1, isPrimary: true })
-          );
-        } else {
-          target.dispatchEvent(new MouseEvent(type, opts));
-        }
-      } catch (_) {
-        try {
-          target.dispatchEvent(new MouseEvent(type, opts));
-        } catch (_) {}
-      }
-    }
+    // 轻量点击：先原生 click，大多数 Ant radio 即可选中
     try {
       target.click();
+      if (input && !input.checked) input.click();
     } catch (_) {}
-    if (input && (input.type === "radio" || input.type === "checkbox")) {
-      try {
-        input.click();
+
+    // 兜底：合成事件（比完整 pointer 序列更轻）
+    try {
+      const opts = { bubbles: true, cancelable: true, view: window, composed: true };
+      target.dispatchEvent(new MouseEvent("mousedown", opts));
+      target.dispatchEvent(new MouseEvent("mouseup", opts));
+      target.dispatchEvent(new MouseEvent("click", opts));
+      if (input) {
         input.checked = true;
         input.dispatchEvent(new Event("input", { bubbles: true }));
         input.dispatchEvent(new Event("change", { bubbles: true }));
-      } catch (_) {}
-    }
+      }
+    } catch (_) {}
     return true;
   }
 
@@ -1245,6 +1232,56 @@
     );
   }
 
+  /** 左侧内容区滚到指定模型图（只滚图片列，不碰答题区） */
+  function scrollToModelImage(modelId) {
+    try {
+      const id = String(modelId || "").trim();
+      if (!id) return false;
+      const labels = findModelLabels();
+      const hit = labels.find((h) => extractModelId(h.raw || textOf(h.el)) === id);
+      if (!hit || !hit.el) return false;
+
+      // 在「内容区」里找该徽章旁的图
+      const { content } = (typeof getAreas === "function" ? getAreas() : {}) || {};
+      let scope = hit.el;
+      for (let i = 0; i < 6 && scope; i++) {
+        const img = pickLargestImg(scope);
+        if (img && isRealGenImg(img)) {
+          // 只滚内容区滚动容器
+          let scroller = content;
+          if (!scroller || !scroller.contains(img)) {
+            scroller = img.parentElement;
+            while (scroller && scroller !== document.body) {
+              const st = getComputedStyle(scroller);
+              if (
+                (st.overflowY === "auto" || st.overflowY === "scroll") &&
+                scroller.scrollHeight > scroller.clientHeight + 20
+              ) {
+                break;
+              }
+              scroller = scroller.parentElement;
+            }
+          }
+          const target = scroller && scroller !== document.body ? scroller : img;
+          if (target.scrollIntoView) {
+            target.scrollIntoView({ block: "center", behavior: "auto" });
+          }
+          // 徽章也保证可见
+          hit.el.scrollIntoView({ block: "center", behavior: "auto" });
+          log(`已滚到 ${id}`);
+          return true;
+        }
+        scope = scope.parentElement;
+      }
+      hit.el.scrollIntoView({ block: "center", behavior: "auto" });
+      log(`已滚到徽章 ${id}（未找到旁侧图片）`);
+      return true;
+    } catch (e) {
+      log("滚动到模型图失败：" + (e && e.message));
+      return false;
+    }
+  }
+
   async function applyScores(scores, meta) {
     // 先做异常标记（不改分），再勾选
     try {
@@ -1259,6 +1296,12 @@
     setStatusDock("勾选分数", `共 ${scores.length} 个模型`);
 
     for (const s of scores) {
+      // 勾选前左侧同步到该模型图
+      if (s && s.model) {
+        setStatusDock("勾选分数", `当前 ${s.model}`);
+        scrollToModelImage(s.model);
+        await sleep(200);
+      }
       const bag = groups.get(s.model) || {};
       const line = { model: s.model, filled: [], miss: [] };
       if (s._skipClick) {
@@ -1748,6 +1791,10 @@
         log("未配置钉钉 Webhook，跳过推送");
         return false;
       }
+      // 先 ping 唤醒 service worker
+      try {
+        await chrome.runtime.sendMessage({ type: "SIRISER_BG_PING" });
+      } catch (_) {}
       const body =
         "【Siriser 标注异常】\n" +
         text.slice(0, 800) +
@@ -1755,18 +1802,21 @@
         location.href.slice(0, 120) +
         "\n时间：" +
         new Date().toLocaleString();
-      // 页面 fetch 会被 CORS 拦，走扩展后台
       const res = await chrome.runtime.sendMessage({
         type: "SIRISER_DINGTALK",
         webhook: hook,
         text: body,
       });
-      const ok = !!(res && res.ok);
+      if (!res) {
+        log("钉钉推送失败：后台无响应（请重新加载扩展）", "err");
+        return false;
+      }
+      const ok = !!res.ok;
       log(
         ok
           ? "钉钉已推送"
           : "钉钉推送失败：" +
-              ((res && (res.error || res.body || res.status)) || "无响应"),
+              (res.error || res.body || res.status || JSON.stringify(res)),
         ok ? "ok" : "err"
       );
       return ok;
@@ -1946,18 +1996,21 @@
     const wait = targetMs - elapsed;
     setStatusDock("等待提交", `已用 ${fmtDur(elapsed)} / ${fmtDur(targetMs)}`, "ok");
 
-    // 已经超过 6–8 分钟目标 → 暂停，不自动交
+    // 已经超过 6–8 分钟目标 → 停止自动，不自动交，也不重跑本题
     if (wait <= 0) {
       clearCountdownInPanel();
-      saveAutoState({ on: true, phase: "paused", submitAt: null, taskKey: null });
+      saveAutoState({ on: false, phase: "off", submitAt: null, taskKey: null });
+      _autoRunning = false;
+      _autoGen += 1;
       log(
-        `已超目标时长 elapsed=${fmtDur(elapsed)} > ${fmtDur(targetMs)}，暂停提交`,
+        `已超目标时长 elapsed=${fmtDur(elapsed)} > ${fmtDur(targetMs)}，停止自动并等待人工`,
         "err"
       );
-      toastMsg("运行+勾选已超过 6–8 分钟，已暂停自动提交");
-      updateCountdownInPanel("已超时 · 已暂停自动提交", true);
+      toastMsg("超过 6–8 分钟，已停止自动，请人工核对后提交");
+      setStatusDock("已暂停", "超时，等待人工提交", "err");
+      updateCountdownInPanel("已超时 · 未自动提交", true);
       notifyDingTalk(
-        `超时暂停：用时 ${fmtDur(elapsed)} 超过目标 ${fmtDur(targetMs)}，未自动提交`
+        `超时停止：用时 ${fmtDur(elapsed)} 超过目标 ${fmtDur(targetMs)}，未自动提交`
       );
       return false;
     }
@@ -2211,10 +2264,18 @@
       el.addEventListener("click", (e) => {
         if (e.target.closest("[data-cd='cancel']")) {
           _cancelSubmit = true;
-          log("用户取消倒计时提交");
+          log("用户取消倒计时提交 → 停止自动，避免再弹开评倒计时");
           clearCountdownInPanel();
-          toastMsg("已取消自动提交");
-          saveAutoState({ on: true, phase: "idle", batchSize: (CFG && CFG.AUTO_BATCH) || 3 });
+          toastMsg("已取消自动提交，自动模式已停止");
+          saveAutoState({
+            on: false,
+            phase: "off",
+            submitAt: null,
+            taskKey: null,
+          });
+          setAutoSwitchUI(false);
+          _autoGen += 1;
+          _autoRunning = false;
         }
       });
     }
@@ -2462,6 +2523,7 @@
     });
   }
   function saveHumanMode(on) {
+    _humanModeCached = !!on;
     try {
       chrome.storage.local.set({ [HUMAN_KEY]: !!on });
     } catch (_) {}
@@ -2473,14 +2535,16 @@
     if (lb) lb.textContent = on ? "已开启拟人点击（2–4s/格）" : "已关闭拟人点击";
   }
 
-  /** 拟人间隔：2–4 秒随机 */
+  /** 拟人间隔：1.2–3.2 秒；模式缓存，避免每点一次都读 storage */
+  let _humanModeCached = null;
   async function humanClickDelay() {
-    const on = await loadHumanMode();
-    if (!on) {
-      await sleep(80);
-      return 80;
+    if (_humanModeCached == null) {
+      _humanModeCached = await loadHumanMode();
     }
-    // 拟人间隔：约 1.2–3.2 秒（90 格约 3.5 分钟内点完）
+    if (!_humanModeCached) {
+      await sleep(60);
+      return 60;
+    }
     const ms = 1200 + Math.floor(Math.random() * 2001);
     await sleep(ms);
     return ms;

@@ -208,6 +208,62 @@ $("btnEval1").addEventListener("click", () => evalFlow(false, 1));
 $("btnEval3").addEventListener("click", () => evalFlow(false, 3));
 $("btnEvalOne").addEventListener("click", () => evalFlow(true, 1));
 
+$("btnTestDing").addEventListener("click", async () => {
+  try {
+    const hook = ($("dingWebhook").value || "").trim();
+    if (!hook || !/^https?:\/\//i.test(hook)) {
+      setStatus("请填写完整 Webhook（http 开头）", "err");
+      $("preview").textContent = "当前值：" + (hook || "（空）");
+      return;
+    }
+    await saveConfig();
+    setStatus("测试钉钉…", "busy");
+    const text =
+      "【Siriser 标注异常】\n测试消息：配置正常\n时间：" + new Date().toLocaleString();
+    // popup 可直接跨域（host_permissions 含 https://*/*）
+    try {
+      const res = await fetch(hook, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ msgtype: "text", text: { content: text } }),
+      });
+      const body = await res.text();
+      if (res.ok && /ok|success/i.test(body)) {
+        setStatus("钉钉已发送", "ok");
+        $("preview").textContent = body;
+      } else {
+        setStatus("钉钉拒绝：" + body.slice(0, 120), "err");
+        $("preview").textContent = body;
+      }
+      return;
+    } catch (e1) {
+      $("preview").textContent =
+        "直接 fetch 失败：" + e1.message + "\n改走后台重试…";
+    }
+    // 后备：background
+    const res = await chrome.runtime.sendMessage({
+      type: "SIRISER_DINGTALK",
+      webhook: hook,
+      text: text,
+    });
+    if (!res) {
+      setStatus("后台无响应，请重新加载扩展", "err");
+      $("preview").textContent += "\n后台无响应";
+      return;
+    }
+    if (res.ok) {
+      setStatus("钉钉已发送（后台）", "ok");
+      $("preview").textContent = res.body || "ok";
+    } else {
+      setStatus("钉钉失败：" + (res.error || res.body || res.status), "err");
+      $("preview").textContent += "\n" + JSON.stringify(res);
+    }
+  } catch (e) {
+    setStatus(e.message, "err");
+    $("preview").textContent = String(e);
+  }
+});
+
 $("btnDiag").addEventListener("click", async () => {
   try {
     setStatus("诊断页面结构…", "busy");
