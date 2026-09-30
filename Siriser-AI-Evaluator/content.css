@@ -580,6 +580,153 @@
   display: block;
 }
 
+/* ── 开评前全屏倒计时 ── */
+#siriser-countdown-overlay {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  display: none;
+}
+#siriser-countdown-overlay.show {
+  display: block;
+  pointer-events: auto;
+}
+.siriser-dim {
+  /* 兼容：给 html 上一层遮罩 */
+}
+.siriser-dim::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 2147483645;
+  background: rgba(12, 16, 20, 0.55);
+  pointer-events: none;
+}
+#siriser-countdown-overlay .sir-cd-center {
+  position: absolute;
+  left: 50%;
+  top: 42%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  color: #fff;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+}
+#siriser-countdown-overlay .sir-cd-label {
+  font: 650 16px/1.4 var(--ui);
+  margin-bottom: 8px;
+  opacity: 0.95;
+}
+#siriser-countdown-overlay .sir-cd-num {
+  font: 700 96px/1 var(--mono);
+  letter-spacing: -0.02em;
+}
+#siriser-countdown-overlay .sir-cd-sub {
+  margin-top: 12px;
+  font: 500 13px/1.4 var(--ui);
+  opacity: 0.85;
+}
+#siriser-countdown-overlay .sir-cd-cancel {
+  position: absolute;
+  right: 24px;
+  bottom: 28px;
+  min-height: 40px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font: 600 13px var(--ui);
+  cursor: pointer;
+}
+#siriser-countdown-overlay .sir-cd-cancel:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+#siriser-countdown-overlay .sir-cd-cancel:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+/* ── 底部常驻状态条 ── */
+#siriser-status-dock {
+  pointer-events: auto;
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 2147483646;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  min-width: 280px;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 8px 10px 8px 12px;
+  border-radius: 999px;
+  background: rgba(28, 35, 41, 0.94);
+  color: #fff;
+  font: 500 12px/1.3 var(--ui);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+#siriser-status-dock.show { display: flex; }
+#siriser-status-dock.mini {
+  min-width: 0;
+  width: 44px;
+  padding: 8px;
+  justify-content: center;
+}
+#siriser-status-dock.mini .sir-sd-stage,
+#siriser-status-dock.mini .sir-sd-detail {
+  display: none;
+}
+#siriser-status-dock .sir-sd-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #8a98a3;
+  flex-shrink: 0;
+}
+#siriser-status-dock.live .sir-sd-dot {
+  background: #34d399;
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.25);
+  animation: siriser-blink 1.2s ease infinite;
+}
+#siriser-status-dock.err .sir-sd-dot {
+  background: #fdba74;
+  animation: none;
+}
+#siriser-status-dock.ok .sir-sd-dot {
+  background: #86efac;
+  animation: none;
+}
+@keyframes siriser-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #siriser-status-dock.live .sir-sd-dot { animation: none; }
+}
+#siriser-status-dock .sir-sd-stage {
+  font-weight: 700;
+  white-space: nowrap;
+}
+#siriser-status-dock .sir-sd-detail {
+  opacity: 0.88;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+#siriser-status-dock .sir-sd-min {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+  font: 700 12px/1 var(--ui);
+  flex-shrink: 0;
+}
+
 /* ── Toast（底部居中） ── */
 #siriser-toast {
   pointer-events: none;

@@ -44,6 +44,23 @@
       if (global.SIRISER_PAGE_LOG) global.SIRISER_PAGE_LOG(msg);
       else console.log("[Siriser]", msg);
     } catch (_) {}
+    // 同步到底部状态条
+    try {
+      if (global.SIRISER_SET_STATUS) {
+        const s = String(msg || "");
+        if (/评委A|judgeA|plus/.test(s) && /请求|进度/.test(s)) {
+          global.SIRISER_SET_STATUS("评委A 打分", s, "");
+        } else if (/评委B|judgeB|max-2026|审核/.test(s) && /请求|进度|审核/.test(s)) {
+          global.SIRISER_SET_STATUS("评委B / 审核", s, "");
+        } else if (/进度 \d+\/\d+/.test(s)) {
+          global.SIRISER_SET_STATUS("大模型打分", s, "");
+        } else if (/压缩|压图|img /.test(s)) {
+          global.SIRISER_SET_STATUS("压缩图片", s, "");
+        } else if (/HTTP4|失败|无权限|403|400|429/.test(s)) {
+          global.SIRISER_SET_STATUS("API 异常", s, "err");
+        }
+      }
+    } catch (_) {}
   }
 
   function scoreAvg(s) {
@@ -346,6 +363,12 @@ alignment 指令遵循, quality 局部质量, preservation 非编辑保持, cons
 - 明显生成伪影：多余手指、文字乱码、结构扭曲、重影、噪点块
 - 整体「一眼 AI」：电影感假、味精色、无真实摄影颗粒
 写实人像/街拍以真实摄影为准；插画/动漫不按照片扣，但仍扣「风格内假光影/糊脸」。
+
+【专家口径】
+- 左右：写「人物左手/右手」按画中人物自身；只写画面左右按观众视角。Prompt 不清做反只轻扣1分，不算严重不遵循。
+- 配件组合（如衬衫+丝巾）：都出现=好；只做一半=轻扣1–2，不连坐其他四维。
+- 模糊指令对了勿重扣；明确指令做错才按上限重扣。
+- 同题好图与差图必须拉开，禁止同一套高分；好差至少差2分。
 
 其余四维：10 极少；有可见瑕疵最高 8；禁止五维同分；无图五项 null 且 notes="no_image"。
 notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛盾）。

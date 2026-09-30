@@ -318,19 +318,13 @@
       const limit = timeoutMs || 15000;
       for (;;) {
         const labels = findModelLabels();
-        let ready = 0;
-        labels.forEach(({ el }) => {
-          const card = resolveModelCard(el);
-          const img = pickLargestImg(card);
-          const w = img && (img.naturalWidth || img.width || 0);
-          if (img && w >= 80) ready += 1;
-        });
-        if (labels.length && ready >= labels.length) {
-          log(`图片就绪 ${ready}/${labels.length}`);
+        const bigImgs = qa("img").filter(isRealGenImg).length;
+        if (labels.length && bigImgs >= labels.length) {
+          log(`图片就绪 labels=${labels.length} imgs=${bigImgs}`);
           return true;
         }
         if (Date.now() - t0 > limit) {
-          log(`等图超时 ready=${ready}/${labels.length || 0}`, "err");
+          log(`等图超时 labels=${labels.length || 0} imgs=${bigImgs}`, "err");
           return false;
         }
         await sleep(500);
@@ -1262,6 +1256,7 @@
     const report = [];
     let clicked = 0;
     const clickT0 = Date.now();
+    setStatusDock("勾选分数", `共 ${scores.length} 个模型`);
 
     for (const s of scores) {
       const bag = groups.get(s.model) || {};
@@ -1541,6 +1536,7 @@
   async function runAutoScore(onlyCurrent, opts) {
     const t0 = Date.now();
     await loadConfigFromStorage();
+    setStatusDock("准备任务", "加载配置 / 识别页面");
     const batchSize = Math.max(1, Number((opts && opts.batchSize) || CFG.BATCH_SIZE || 1));
     const task = collectTask();
     log(
@@ -1566,6 +1562,7 @@
         " batch=" +
         batchSize
     );
+    setStatusDock("调用 API", `模型 ${payloadModels.length} 个 · 批 ${batchSize}`);
     const histHint = await buildHistHint(payloadModels).catch(() => "");
     if (histHint) log("已附历史史均提示");
     let scores;
@@ -1646,6 +1643,7 @@
       apiMs: Date.now() - t0,
     });
     log("完成 · 用时 " + fmtDur(Date.now() - t0), "ok");
+    setStatusDock("本题完成", `用时 ${fmtDur(Date.now() - t0)}`, "ok");
     beepDone();
     return scores;
   }
@@ -1655,6 +1653,7 @@
   let _autoRunning = false;
   let _cancelSubmit = false;
   let _autoGen = 0;
+  let _firstTaskDone = false;
 
   function loadAutoState() {
     return new Promise((resolve) => {
@@ -1692,6 +1691,91 @@
     return false;
   }
 
+  /** 底部常驻状态条（后台运行时可见） */
+  function ensureStatusDock() {
+    let dock = document.getElementById("siriser-status-dock");
+    if (dock) return dock;
+    dock = document.createElement("div");
+    dock.id = "siriser-status-dock";
+    dock.innerHTML = `
+      <span class="sir-sd-dot" id="siriser-sd-dot"></span>
+      <span class="sir-sd-stage" id="siriser-sd-stage">待命</span>
+      <span class="sir-sd-detail" id="siriser-sd-detail">未开始</span>
+      <button type="button" class="sir-sd-min" id="siriser-sd-min" title="收起">—</button>
+    `;
+    document.body.appendChild(dock);
+    dock.querySelector("#siriser-sd-min").addEventListener("click", () => {
+      dock.classList.toggle("mini");
+      dock.querySelector("#siriser-sd-min").textContent = dock.classList.contains("mini")
+        ? "+"
+        : "—";
+    });
+    return dock;
+  }
+
+  function setStatusDock(stage, detail, tone) {
+    const dock = ensureStatusDock();
+    dock.classList.add("show", "live");
+    dock.classList.remove("err", "ok");
+    if (tone === "err") dock.classList.add("err");
+    if (tone === "ok") dock.classList.add("ok");
+    const st = dock.querySelector("#siriser-sd-stage");
+    const dt = dock.querySelector("#siriser-sd-detail");
+    if (st) st.textContent = stage || "运行中";
+    if (dt) dt.textContent = detail || "";
+  }
+
+  function hideStatusDock() {
+    const dock = document.getElementById("siriser-status-dock");
+    if (dock) {
+      dock.classList.remove("live", "err", "ok");
+      dock.classList.add("show");
+      dock.classList.remove("show");
+    }
+  }
+
+  // 供 api.js 回写阶段
+  try {
+    window.SIRISER_SET_STATUS = setStatusDock;
+    window.SIRISER_STATUS_HIDE = hideStatusDock;
+  } catch (_) {}
+
+  async function notifyDingTalk(text) {
+    try {
+      await loadConfigFromStorage();
+      const hook = String((CFG && CFG.DINGTALK_WEBHOOK) || "").trim();
+      if (!hook || !/^https?:\/\//i.test(hook)) {
+        log("未配置钉钉 Webhook，跳过推送");
+        return false;
+      }
+      const body =
+        "【Siriser 标注异常】\n" +
+        text.slice(0, 800) +
+        "\n页面：" +
+        location.href.slice(0, 120) +
+        "\n时间：" +
+        new Date().toLocaleString();
+      // 页面 fetch 会被 CORS 拦，走扩展后台
+      const res = await chrome.runtime.sendMessage({
+        type: "SIRISER_DINGTALK",
+        webhook: hook,
+        text: body,
+      });
+      const ok = !!(res && res.ok);
+      log(
+        ok
+          ? "钉钉已推送"
+          : "钉钉推送失败：" +
+              ((res && (res.error || res.body || res.status)) || "无响应"),
+        ok ? "ok" : "err"
+      );
+      return ok;
+    } catch (e) {
+      log("钉钉推送失败：" + (e && e.message), "err");
+      return false;
+    }
+  }
+
   async function stopAuto(reason, opts) {
     const silent = !!(opts && opts.silent);
     _autoGen += 1;
@@ -1699,10 +1783,13 @@
     _cancelSubmit = false;
     saveAutoState({ on: false, phase: "off", submitAt: null, reason: reason || "stopped", at: Date.now() });
     log("全自动停止：" + (reason || ""));
-    if (silent) return;
-    try {
-      alert("Siriser 全自动已停止：\n" + (reason || "异常"));
-    } catch (_) {}
+    // 用户手动关不推送；异常停止才推钉钉
+    if (!silent) {
+      notifyDingTalk("全自动已停止\n" + (reason || "异常"));
+      try {
+        alert("Siriser 全自动已停止：\n" + (reason || "异常"));
+      } catch (_) {}
+    }
   }
 
   /** 开始新一轮前清掉旧倒计时，避免重载后串表 */
@@ -1738,43 +1825,143 @@
     }
   }
 
+  /** 开评前倒计时：全屏半透明 + 居中数字 + 右下角取消 */
+  function ensureCountdownOverlay() {
+    let box = document.getElementById("siriser-countdown-overlay");
+    if (box) return box;
+    box = document.createElement("div");
+    box.id = "siriser-countdown-overlay";
+    box.innerHTML = `
+      <div class="sir-cd-center">
+        <div class="sir-cd-label" id="siriser-cd-label">即将开始评分</div>
+        <div class="sir-cd-num" id="siriser-cd-num">5</div>
+        <div class="sir-cd-sub">任务包已就绪，可随时取消</div>
+      </div>
+      <button type="button" class="sir-cd-cancel" id="siriser-cd-cancel">取消倒计时</button>
+    `;
+    document.body.appendChild(box);
+    return box;
+  }
+
+  async function countdownBeforeScore(seconds, label) {
+    const total = Math.max(1, Number(seconds) || 5);
+    const box = ensureCountdownOverlay();
+    const numEl = box.querySelector("#siriser-cd-num");
+    const labelEl = box.querySelector("#siriser-cd-label");
+    const cancelBtn = box.querySelector("#siriser-cd-cancel");
+    if (labelEl) labelEl.textContent = `即将开始${label || "评分"}`;
+    box.classList.add("show");
+    document.documentElement.classList.add("siriser-dim");
+
+    let cancelled = false;
+    const onCancel = () => {
+      cancelled = true;
+    };
+    if (cancelBtn) cancelBtn.addEventListener("click", onCancel, { once: true });
+
+    try {
+      for (let i = total; i >= 1; i--) {
+        if (cancelled || _cancelSubmit) break;
+        if (numEl) numEl.textContent = String(i);
+        await sleep(1000);
+      }
+    } finally {
+      if (cancelBtn) cancelBtn.removeEventListener("click", onCancel);
+      box.classList.remove("show");
+      document.documentElement.classList.remove("siriser-dim");
+    }
+
+    if (cancelled || _cancelSubmit) {
+      log("开评倒计时已取消");
+      toastMsg("已取消，未开始本题评分");
+      return false;
+    }
+    return true;
+  }
+
   async function autoOneTask(gen) {
     const myGen = gen == null ? _autoGen : gen;
-    // 新一轮：清掉可能残留的旧倒计时
     await clearStoredCountdown();
-    // 换题后图可能还没加载（0×0 → 压成 3KB → API 无分）
+    // 新任务包：5 秒全屏倒计时后再开评（可取消）
+    const go = await countdownBeforeScore(5, "评分");
+    if (!go || _autoGen !== myGen) {
+      // 取消倒计时 = 停掉整段自动，避免死循环
+      await stopAuto("用户取消开评倒计时", { silent: true });
+      toastMsg("已取消开评，自动模式已停止");
+      return false;
+    }
+
+    // 本题目标：从开始评分到提交，总时长随机 6–8 分钟
+    const t0 = Date.now();
+    const targetMs = randTotalMs();
+    log(`本题目标总时长 ${fmtDur(targetMs)}（含评分+勾选+等待）`);
+
     await waitImagesSafe(20000);
     await sleep(800);
 
     let scores = null;
     let missing = [];
     let retries = 0;
-    for (;;) {
-      if (_autoGen !== myGen) return false;
-      if (retries > 0) {
-        await waitImagesSafe(10000);
-        await sleep(600);
+    try {
+      for (;;) {
+        if (_autoGen !== myGen) return false;
+        if (retries > 0) {
+          await waitImagesSafe(10000);
+          await sleep(600);
+        }
+        scores = await runAutoScore(false, { batchSize: Number(CFG.AUTO_BATCH) || 3 });
+        missing = missingScoreIds(scores);
+        if (!missing.length) {
+          log("全自动：分数齐全", "ok");
+          break;
+        }
+        retries += 1;
+        log(`全自动：缺分 ${missing.join(",")} → 重评 ${retries}/2`, "err");
+        if (retries >= 2) {
+          clearCountdownInPanel();
+          await stopAuto(`连续 2 次重评仍缺分：${missing.join(",")}`);
+          return false;
+        }
+        await sleep(2500);
       }
-      scores = await runAutoScore(false, { batchSize: Number(CFG.AUTO_BATCH) || 3 });
-      missing = missingScoreIds(scores);
-      if (!missing.length) {
-        log("全自动：分数齐全", "ok");
-        break;
-      }
-      retries += 1;
-      log(`全自动：缺分 ${missing.join(",")} → 重评 ${retries}/2`, "err");
-      if (retries >= 2) {
-        clearCountdownInPanel();
-        await stopAuto(`连续 2 次重评仍缺分：${missing.join(",")}`);
-        return false;
-      }
-      await sleep(2500);
+    } catch (e) {
+      // API/执行异常：整段停止，不再循环下一题（防死循环）
+      clearCountdownInPanel();
+      saveAutoState({ on: false, phase: "off", submitAt: null, taskKey: null });
+      log("API/执行异常，自动已停止：" + (e && e.message), "err");
+      toastMsg("API 异常，自动已停止，请改配置后再启动");
+      setStatusDock("已停止", String((e && e.message) || "").slice(0, 60), "err");
+      notifyDingTalk("API/执行异常，自动已停止\n" + (e && e.message));
+      try {
+        alert("Siriser 自动已停止：\n" + ((e && e.message) || "异常"));
+      } catch (_) {}
+      _autoRunning = false;
+      _autoGen += 1;
+      return false;
     }
 
     if (_autoGen !== myGen) return false;
 
-    // 2) 本题新倒计时（覆盖旧 submitAt）
-    const wait = randDelayMs();
+    const elapsed = Date.now() - t0;
+    const wait = targetMs - elapsed;
+    setStatusDock("等待提交", `已用 ${fmtDur(elapsed)} / ${fmtDur(targetMs)}`, "ok");
+
+    // 已经超过 6–8 分钟目标 → 暂停，不自动交
+    if (wait <= 0) {
+      clearCountdownInPanel();
+      saveAutoState({ on: true, phase: "paused", submitAt: null, taskKey: null });
+      log(
+        `已超目标时长 elapsed=${fmtDur(elapsed)} > ${fmtDur(targetMs)}，暂停提交`,
+        "err"
+      );
+      toastMsg("运行+勾选已超过 6–8 分钟，已暂停自动提交");
+      updateCountdownInPanel("已超时 · 已暂停自动提交", true);
+      notifyDingTalk(
+        `超时暂停：用时 ${fmtDur(elapsed)} 超过目标 ${fmtDur(targetMs)}，未自动提交`
+      );
+      return false;
+    }
+
     const deadline = Date.now() + wait;
     const taskKey = (taskPromptKey() || "t") + "@" + Date.now();
     _cancelSubmit = false;
@@ -1785,7 +1972,9 @@
       taskKey,
       batchSize: Number(CFG.AUTO_BATCH) || 3,
     });
-    log(`全自动：${fmtDur(wait)} 后提交（新倒计时 task=${taskKey}）`);
+    log(
+      `全自动：评分+勾选用时 ${fmtDur(elapsed)}，再等 ${fmtDur(wait)} 提交（合计约 ${fmtDur(targetMs)}）`
+    );
 
     while (Date.now() < deadline) {
       if (_autoGen !== myGen) return false;
@@ -1796,14 +1985,17 @@
         log("倒计时已取消，不提交");
         return false;
       }
-      // 存储被别的实例改掉则退出
       if (st.taskKey && st.taskKey !== taskKey) {
         clearCountdownInPanel();
         log("倒计时被新任务替换，旧闹钟作废");
         return false;
       }
       const left = deadline - Date.now();
-      updateCountdownInPanel(`${fmtDur(left)} 后自动提交`, left < 30 * 1000);
+      const totalUsed = Date.now() - t0;
+      updateCountdownInPanel(
+        `${fmtDur(left)} 后自动提交 · 已用 ${fmtDur(totalUsed)}/${fmtDur(targetMs)}`,
+        left < 30 * 1000
+      );
       await sleep(1000);
     }
 
@@ -1812,11 +2004,26 @@
       return false;
     }
     updateCountdownInPanel("正在提交…", true);
+    // 提交可能触发整页跳转：提交前先把 phase 记成 running，刷新后才能续跑
+    saveAutoState({
+      on: true,
+      phase: "running",
+      submitAt: null,
+      taskKey: null,
+      batchSize: Number(CFG.AUTO_BATCH) || 3,
+    });
     const ok = submitAndNext();
     clearCountdownInPanel();
-    saveAutoState({ on: true, phase: "idle", submitAt: null, taskKey: null });
+    // 未跳转则继续等 2s 跑下一题；已跳转则由加载页续跑
+    saveAutoState({
+      on: true,
+      phase: "running",
+      submitAt: null,
+      taskKey: null,
+      batchSize: Number(CFG.AUTO_BATCH) || 3,
+    });
     if (!ok) log("全自动：提交按钮未找到", "err");
-    else log("全自动：已提交", "ok");
+    else log(`全自动：已提交 · 总用时 ${fmtDur(Date.now() - t0)}`, "ok");
     return ok;
   }
 
@@ -1828,9 +2035,9 @@
     }
   }
 
-  function randDelayMs() {
-    // 6–8 分钟
-    return 6 * 60 * 1000 + Math.floor(Math.random() * 2 * 60 * 1000);
+  /** 本题总时长目标：随机 6–8 分钟（含评分+勾选+等待） */
+  function randTotalMs() {
+    return 6 * 60 * 1000 + Math.floor(Math.random() * 2 * 60 * 1000 + 1);
   }
 
   async function autoLoop() {
@@ -1885,7 +2092,12 @@
 
         const ok = await autoOneTask(myGen);
         if (!_autoRunning || _autoGen !== myGen) break;
-        if (!ok) log("本题流程未完全成功，进入下一题");
+        if (!ok) {
+          // 失败且开关已关 → 退出；否则才是继续下一题
+          const stx = await loadAutoState();
+          if (!stx.on) break;
+          log("本题未完成，按当前开关决定是否继续");
+        }
         await sleep(2000);
         if (!_autoRunning || _autoGen !== myGen) break;
       } catch (e) {
@@ -2268,7 +2480,8 @@
       await sleep(80);
       return 80;
     }
-    const ms = 2000 + Math.floor(Math.random() * 2001);
+    // 拟人间隔：约 1.2–3.2 秒（90 格约 3.5 分钟内点完）
+    const ms = 1200 + Math.floor(Math.random() * 2001);
     await sleep(ms);
     return ms;
   }
@@ -2623,9 +2836,13 @@
     document.addEventListener("DOMContentLoaded", () => {
       loadConfigFromStorage().then(mountFab).then(() => {
         loadAutoState().then((st) => {
+          // 提交后换题会整页刷新：只要开关开着且在跑，就继续下一题
           if (st && st.on && (st.phase === "running" || st.phase === "countdown")) {
             log("自动进行中，续跑 phase=" + st.phase);
-            autoLoop();
+            // 等新任务图/题面稳定一点再开
+            setTimeout(() => {
+              autoLoop();
+            }, 1200);
           }
         });
       });
@@ -2637,7 +2854,9 @@
         loadAutoState().then((st) => {
           if (st && st.on && (st.phase === "running" || st.phase === "countdown")) {
             log("自动进行中，续跑 phase=" + st.phase);
-            autoLoop();
+            setTimeout(() => {
+              autoLoop();
+            }, 1200);
           }
         })
       );

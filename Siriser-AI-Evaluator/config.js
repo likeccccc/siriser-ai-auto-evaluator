@@ -27,6 +27,12 @@ window.SIRISER_CONFIG = {
   },
   AUTO_SUBMIT: false,
   AUTO_NEXT: false,
+  /**
+   * 钉钉自定义机器人 Webhook
+   * 例：https://oapi.dingtalk.com/robot/send?access_token=xxxx
+   * 异常时 POST 文本消息；留空则不推送
+   */
+  DINGTALK_WEBHOOK: "",
   /** 单次 API 超时（ms）。通义偶发很慢，给到 5 分钟 */
   TIMEOUT_MS: 300000,
 

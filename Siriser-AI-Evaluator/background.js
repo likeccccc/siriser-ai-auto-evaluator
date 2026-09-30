@@ -62,6 +62,27 @@ chrome.runtime.onMessage.addListener(function (msg, _sender, sendResponse) {
     return false;
   }
 
+  // 钉钉 Webhook：必须在后台发，页面 fetch 会被 CORS 拦
+  if (msg.type === "SIRISER_DINGTALK") {
+    (async function () {
+      try {
+        const res = await fetch(msg.webhook, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            msgtype: "text",
+            text: { content: String(msg.text || "") },
+          }),
+        });
+        const body = await res.text();
+        sendResponse({ ok: res.ok, status: res.status, body: body.slice(0, 200) });
+      } catch (e) {
+        sendResponse({ ok: false, error: String((e && e.message) || e) });
+      }
+    })();
+    return true;
+  }
+
   if (msg.type === "SIRISER_FETCH_IMAGE") {
     (async function () {
       try {

@@ -31,6 +31,7 @@ const DEFAULTS = {
   OPENAI_MODEL_2: "",
   OPENAI_MODEL_REVIEW: "",
   DUAL_DIFF_THRESHOLD: 2,
+  DINGTALK_WEBHOOK: "",
   AUTO_SUBMIT: true,
   AUTO_NEXT: true,
 };
@@ -88,6 +89,7 @@ async function saveConfig() {
     OPENAI_MODEL_2: $("oaModel2").value.trim(),
     OPENAI_MODEL_REVIEW: $("oaModelReview").value.trim(),
     DUAL_DIFF_THRESHOLD: Number($("dualThreshold").value) || 2,
+    DINGTALK_WEBHOOK: $("dingWebhook").value.trim(),
     OPENAI_API_KEY: $("oaKey").value.trim(),
     AUTO_SUBMIT: $("autoSubmit").checked,
     AUTO_NEXT: $("autoNext").checked,
@@ -119,6 +121,7 @@ async function initForm() {
   $("oaModel2").value = cfg.OPENAI_MODEL_2 || "";
   $("oaModelReview").value = cfg.OPENAI_MODEL_REVIEW || "";
   $("dualThreshold").value = cfg.DUAL_DIFF_THRESHOLD != null ? cfg.DUAL_DIFF_THRESHOLD : 2;
+  $("dingWebhook").value = cfg.DINGTALK_WEBHOOK || "";
   $("oaKey").value = cfg.OPENAI_API_KEY || "";
   $("autoSubmit").checked = !!cfg.AUTO_SUBMIT;
   $("autoNext").checked = !!cfg.AUTO_NEXT;
