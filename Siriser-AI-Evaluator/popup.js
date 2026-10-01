@@ -33,6 +33,7 @@ const DEFAULTS = {
   DUAL_DIFF_THRESHOLD: 3,
   MAX_REVIEW: 1,
   REVIEW_BUDGET_MS: 60000,
+  MAX_OUTPUT_TOKENS: 768,
   DINGTALK_WEBHOOK: "",
   AUTO_SUBMIT: false,
   AUTO_NEXT: true,
@@ -317,13 +318,22 @@ $("btnTestModel").addEventListener("click", async () => {
       $("preview").textContent = "缺少 OPENAI_MODEL";
       return;
     }
+    if (/^qwen.*thinking(?:-|$)/i.test(model)) {
+      setStatus("已阻止纯思考模型测试", "err");
+      $("preview").textContent =
+        `${model} 是纯思考模型，可能产生大量输出 Token。\n` +
+        "请改用 instruct 或可关闭思考的 Qwen 3.7/3.8 模型。";
+      return;
+    }
     setStatus(`测试模型 ${model} 收图打分…`, "busy");
     setProg(25);
 
     const img = makeTestImage();
+    const isQwen3Family = /^qwen3(?:[.-]|$)/i.test(model);
+    const supportsMaxCompletionTokens =
+      /^qwen3\.[5-9]-(?:max|plus|flash)(?:-|$)/i.test(model);
     const body = {
       model,
-      max_tokens: 300,
       temperature: 0,
       messages: [
         {
@@ -341,10 +351,10 @@ $("btnTestModel").addEventListener("click", async () => {
         },
       ],
     };
-    if (/qwen/i.test(model)) {
+    if (supportsMaxCompletionTokens) body.max_completion_tokens = 300;
+    else body.max_tokens = 300;
+    if (isQwen3Family) {
       body.enable_thinking = false;
-      body.thinking = { type: "disabled" };
-      body.extra_body = { enable_thinking: false };
     }
 
     const ctrl = new AbortController();
@@ -400,8 +410,20 @@ $("btnTestModel").addEventListener("click", async () => {
     const score = parsed && parsed.score != null ? parsed.score : "—";
     const color = (parsed && parsed.main_color) || "—";
     const note = (parsed && parsed.note) || "";
+    const usage = data.usage || {};
+    const details = usage.completion_tokens_details || {};
+    const inputTokens = Number(usage.prompt_tokens) || 0;
+    const outputTokens = Number(usage.completion_tokens) || 0;
+    const reasoningTokens = Number(details.reasoning_tokens) || 0;
+    const finishReason = data.choices?.[0]?.finish_reason || "";
 
-    if (see) {
+    if (reasoningTokens > 0) {
+      setStatus(`成本保护：仍产生 ${reasoningTokens} 思考 Token`, "err");
+      setProg(100);
+    } else if (finishReason === "length") {
+      setStatus("成本保护：测试输出达到上限", "err");
+      setProg(100);
+    } else if (see) {
       setStatus(`模型可用 · 出分 ${score}`, "ok");
       setProg(100);
     } else {
@@ -414,6 +436,8 @@ $("btnTestModel").addEventListener("click", async () => {
       `见图：${see ? "是" : "否"}`,
       `主色：${color}`,
       `测试分：${score}`,
+      `Token：输入 ${inputTokens} / 输出 ${outputTokens} / 思考 ${reasoningTokens}`,
+      finishReason ? `结束原因：${finishReason}` : "",
       note ? `备注：${note}` : "",
       "",
       "---- 原始回复 ----",

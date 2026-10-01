@@ -419,7 +419,23 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       userPartsOverride || buildOpenAIUserContent(SHORT_SYSTEM, task, models)
     );
     const modelName = cfg.OPENAI_MODEL || "gpt-4o-mini";
+    const outputLimit = Math.max(
+      128,
+      Math.min(4096, Number(cfg.MAX_OUTPUT_TOKENS) || 768)
+    );
+    const isQwen3Family = /^qwen3(?:[.-]|$)/i.test(modelName);
+    const supportsMaxCompletionTokens =
+      /^qwen3\.[5-9]-(?:max|plus|flash)(?:-|$)/i.test(modelName);
     const t0 = Date.now();
+
+    // 纯 thinking 型号无法可靠关闭思考，禁止用于高频评分，防止一次任务烧掉数万 token。
+    if (/^qwen.*thinking(?:-|$)/i.test(modelName)) {
+      const err = new Error(
+        "API失败：" + modelName + " 是纯思考模型，不适合高频评分。请改用 instruct 或可关闭思考的模型。"
+      );
+      err.fatal = true;
+      throw err;
+    }
 
     const body = {
       model: modelName,
@@ -429,13 +445,17 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         { role: "user", content },
       ],
     };
-    // 仅在模型名含 thinking 时尝试关思考；禁止默认关（有的模型强制 True）
-    const isThinkingName = /thinking/i.test(modelName);
-    if (isThinkingName) {
+    // Qwen 3.7/3.8 等混合思考模型默认会产生大量隐藏推理 token。
+    // 原生 HTTP 请求必须把 enable_thinking 放在 body 顶层。
+    if (isQwen3Family) {
       body.enable_thinking = false;
-      body.thinking = { type: "disabled" };
-      body.extra_body = { enable_thinking: false };
-      slog("警告：模型名含 thinking，已尝试 enable_thinking=false");
+      slog(`成本保护：${modelName} 已关闭思考`);
+    }
+    // max_completion_tokens 能同时限制思考链和可见回答；其他模型退回 max_tokens。
+    if (supportsMaxCompletionTokens) {
+      body.max_completion_tokens = outputLimit;
+    } else {
+      body.max_tokens = outputLimit;
     }
     // thinking / 部分端点不认 response_format，先不带，更快
     if (!/qwen3|thinking/i.test(modelName)) {
@@ -482,12 +502,27 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         err.fatal = true;
         throw err;
       }
-      delete body.response_format;
-      delete body.enable_thinking;
-      delete body.thinking;
-      delete body.extra_body;
-      if (/enable_thinking|thinking parameter/i.test(errText)) {
-        slog("该模型强制 enable_thinking，去掉参数重试");
+      let canRetrySafely = false;
+      if (/response_format|json_object|json_schema/i.test(errText) && body.response_format) {
+        delete body.response_format;
+        canRetrySafely = true;
+        slog("端点不支持 response_format，保留成本保护后重试");
+      }
+      if (/max_completion_tokens/i.test(errText) && body.max_completion_tokens) {
+        delete body.max_completion_tokens;
+        body.max_tokens = outputLimit;
+        canRetrySafely = true;
+        slog("端点不支持 max_completion_tokens，改用 max_tokens 重试");
+      }
+      // 对已知支持关闭思考的 Qwen3，绝不删除此参数后裸跑。
+      if (/enable_thinking/i.test(errText) && !isQwen3Family) {
+        delete body.enable_thinking;
+        canRetrySafely = true;
+      }
+      if (!canRetrySafely) {
+        const err = new Error("API失败 HTTP 400 " + errText.slice(0, 300));
+        err.fatal = true;
+        throw err;
       }
       res = await doPost(body);
       if (!res.ok) {
@@ -506,6 +541,35 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     }
 
     const data = await res.json();
+    const usage = data.usage || {};
+    const completionDetails = usage.completion_tokens_details || {};
+    const promptDetails = usage.prompt_tokens_details || {};
+    const inputTokens = Number(usage.prompt_tokens) || 0;
+    const outputTokens = Number(usage.completion_tokens) || 0;
+    const reasoningTokens = Number(completionDetails.reasoning_tokens) || 0;
+    const cachedTokens = Number(promptDetails.cached_tokens) || 0;
+    const finishReason = data.choices?.[0]?.finish_reason || "";
+    slog(
+      `Token ${modelName} 输入=${inputTokens}` +
+        (cachedTokens ? `(缓存${cachedTokens})` : "") +
+        ` 输出=${outputTokens}` +
+        (reasoningTokens ? ` 思考=${reasoningTokens}` : "") +
+        (finishReason ? ` finish=${finishReason}` : "")
+    );
+    if (isQwen3Family && reasoningTokens > 0) {
+      const err = new Error(
+        `成本保护触发：${modelName} 仍产生 ${reasoningTokens} 个思考 token，已停止后续评分。`
+      );
+      err.fatal = true;
+      throw err;
+    }
+    if (finishReason === "length") {
+      const err = new Error(
+        `成本保护触发：${modelName} 输出达到 ${outputLimit} token 上限，已停止，避免继续重试耗费。`
+      );
+      err.fatal = true;
+      throw err;
+    }
     const text = data.choices?.[0]?.message?.content || "{}";
     const parsed = safeJson(text);
     const scores = normalizeScores(parsed);

@@ -20,6 +20,8 @@ window.SIRISER_CONFIG = {
   BATCH_SIZE: 1,
   /** 逐张评分时的并发路数（2–3）；合评时固定 1 */
   PARALLEL: 2,
+  /** 单次请求最大输出 Token；Qwen 3.7+ 同时限制思考链与最终回答 */
+  MAX_OUTPUT_TOKENS: 768,
   /**
    * 模型基础先验（史均不足时的默认期望）
    * 观察：A–D 往往更好，往后逐级略降
