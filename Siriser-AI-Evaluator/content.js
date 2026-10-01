@@ -1305,6 +1305,17 @@
     let clicked = 0;
     const clickT0 = Date.now();
     setStatusDock("勾选分数", `共 ${scores.length} 个模型`);
+    if (_humanModeCached == null) {
+      _humanModeCached = await loadHumanMode();
+    }
+    log(
+      "点击节奏：" +
+        (!_humanModeCached
+          ? "拟人关闭（60ms/格）"
+          : _rushClicks
+            ? "自动赶工（180–400ms/格）"
+            : "普通拟人（1.0–2.6s/格）")
+    );
 
     for (const s of scores) {
       // 勾选前左侧同步到该模型图
@@ -1341,8 +1352,15 @@
         fireClick(target);
         markSelected(target);
         // 自动模式用时近半 → 赶工，缩短拟人间隔，避免点完就撞总时长
-        if (_autoScoreT0 && Date.now() - _autoScoreT0 > _autoScoreTargetMs * 0.45) {
+        if (
+          _humanModeCached &&
+          !_rushClicks &&
+          _autoScoreT0 &&
+          _autoScoreTargetMs > 0 &&
+          Date.now() - _autoScoreT0 > _autoScoreTargetMs * 0.45
+        ) {
           _rushClicks = true;
+          log("点击节奏切换：自动任务已用时近半，进入赶工（180–400ms/格）");
         }
         const gap = await humanClickDelay();
         if (gap > 500) log(`拟人间隔 ${gap}ms`);
@@ -1593,6 +1611,10 @@
 
   async function runAutoScore(onlyCurrent, opts) {
     const t0 = Date.now();
+    const isAutoTask = !!(opts && opts.autoMode);
+    if (!isAutoTask) {
+      resetAutoClickTiming("手动评分开始");
+    }
     await loadConfigFromStorage();
     setStatusDock("准备任务", "加载配置 / 识别页面");
     const batchSize = Math.max(1, Number((opts && opts.batchSize) || CFG.BATCH_SIZE || 1));
@@ -1907,6 +1929,7 @@
     _autoGen += 1;
     _autoRunning = false;
     _cancelSubmit = false;
+    resetAutoClickTiming("自动模式停止");
     saveAutoState({ on: false, phase: "off", submitAt: null, reason: reason || "stopped", at: Date.now() });
     log("全自动停止：" + (reason || ""));
     // 用户手动关不推送；异常停止才推钉钉（必须 await）
@@ -2040,7 +2063,10 @@
           await waitImagesSafe(10000);
           await sleep(600);
         }
-        scores = await runAutoScore(false, { batchSize: Number(CFG.AUTO_BATCH) || 3 });
+        scores = await runAutoScore(false, {
+          batchSize: Number(CFG.AUTO_BATCH) || 3,
+          autoMode: true,
+        });
         missing = missingScoreIds(scores);
         if (!missing.length) {
           log("全自动：分数齐全", "ok");
@@ -2066,6 +2092,9 @@
     }
 
     if (_autoGen !== myGen) return false;
+
+    // 评分与勾选已经结束；后续只等待提交，不允许赶工状态泄漏到手动评分。
+    resetAutoClickTiming("自动任务勾选结束");
 
     const elapsed = Date.now() - t0;
     const wait = targetMs - elapsed;
@@ -2190,6 +2219,14 @@
   let _rushClicks = false;
   let _autoScoreT0 = 0;
   let _autoScoreTargetMs = 0;
+
+  function resetAutoClickTiming(reason) {
+    const hadState = !!(_rushClicks || _autoScoreT0 || _autoScoreTargetMs);
+    _rushClicks = false;
+    _autoScoreT0 = 0;
+    _autoScoreTargetMs = 0;
+    if (hadState && reason) log(`点击节奏已重置：${reason}`);
+  }
 
   async function autoLoop() {
     if (_autoRunning) return;
