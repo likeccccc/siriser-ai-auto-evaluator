@@ -267,13 +267,40 @@
     });
   }
 
+  /** 图片本体已失败：不能用 CSS 渲染尺寸掩盖 naturalWidth=0 的破图 */
+  function hasBrokenImageSignature(im) {
+    if (!im) return false;
+    const src = String(im.currentSrc || im.src || im.getAttribute("src") || "").toLowerCase();
+    const lazySrc = String(
+      im.getAttribute("data-src") || im.getAttribute("data-original") || ""
+    ).toLowerCase();
+    const hint = `${src} ${lazySrc} ${im.alt || ""} ${im.title || ""} ${im.className || ""}`.toLowerCase();
+    if (/could not process|load[ _-]?error|image[ _-]?error|broken|placeholder|fail(?:ed|ure)?/.test(hint)) {
+      return true;
+    }
+    const nw = Number(im.naturalWidth) || 0;
+    const nh = Number(im.naturalHeight) || 0;
+    return !!src && im.complete === true && (nw === 0 || nh === 0);
+  }
+
+  /** 只把占据图片槽位的破图作为模型候选，排除页面上零尺寸的小图标。 */
+  function isBrokenModelImg(im) {
+    if (!hasBrokenImageSignature(im)) return false;
+    const r = im.getBoundingClientRect ? im.getBoundingClientRect() : null;
+    const w = Math.max(Number(im.width) || 0, (r && r.width) || 0);
+    const h = Math.max(Number(im.height) || 0, (r && r.height) || 0);
+    return w >= 64 || h >= 64;
+  }
+
   /** 真实生成图：排除错误占位图、icon、过小图 */
   function isRealGenImg(im) {
     if (!im) return false;
-    const w = im.naturalWidth || im.width || 0;
-    const h = im.naturalHeight || im.height || 0;
+    if (hasBrokenImageSignature(im)) return false;
+    const w = Number(im.naturalWidth) || 0;
+    const h = Number(im.naturalHeight) || 0;
     const src = (im.currentSrc || im.src || "").toLowerCase();
     const alt = (im.alt || "").toLowerCase();
+    if (im.complete === false || !src) return false;
     if (w < 80 || h < 80) return false;
     if (/could not|error|placeholder|broken|fail/i.test(src + " " + alt)) return false;
     if (/logo|icon|avatar|spinner/i.test(alt + " " + (im.className || ""))) return false;
@@ -288,10 +315,11 @@
       return true;
     }
     if (!img) return false; // 只是没找到 img，不算异常
-    const w = img.naturalWidth || img.width || 0;
-    const h = img.naturalHeight || img.height || 0;
-    // 已加载完却是 0 尺寸 / 破图 alt
-    if (img.complete && w < 80 && h < 80) return true;
+    if (hasBrokenImageSignature(img)) return true;
+    const w = Number(img.naturalWidth) || 0;
+    const h = Number(img.naturalHeight) || 0;
+    // 已加载完却只有占位图尺寸
+    if (img.complete && w > 0 && h > 0 && w < 80 && h < 80) return true;
     const s = (img.currentSrc || img.src || "").toLowerCase();
     const a = (img.alt || "").toLowerCase();
     if (/could not process|load error|broken|placeholder/i.test(s + " " + a)) return true;
@@ -312,16 +340,19 @@
             .filter(Boolean)
         );
         const need = ids.size || labels.length || 1;
-        const bigImgs = qa("img").filter(isRealGenImg).length;
-        if (bigImgs >= need) {
-          log(`图片就绪 models=${need} imgs=${bigImgs}`);
+        const pageImgs = qa("img");
+        const bigImgs = pageImgs.filter(isRealGenImg).length;
+        const brokenImgs = pageImgs.filter(isBrokenModelImg).length;
+        const resolvedImgs = bigImgs + brokenImgs;
+        if (resolvedImgs >= need) {
+          log(`图片就绪 models=${need} ok=${bigImgs} broken=${brokenImgs}`);
           return true;
         }
         if (Date.now() - t0 > limit) {
           log(`等图超时 models=${need} imgs=${bigImgs}`, "err");
           notifyAbnormal(
             "等图超时",
-            `模型 ${need} / 大图 ${bigImgs}，${fmtDur(limit)} 内未就绪，将继续评分（可能缺图）`
+            `模型 ${need} / 正常图 ${bigImgs} / 破图 ${brokenImgs}，${fmtDur(limit)} 内未就绪，将继续评分（可能缺图）`
           ).catch(() => {});
           return false;
         }
@@ -358,13 +389,17 @@
     function imgNear(labelEl) {
     const grab = (root) => {
       if (!root) return null;
-      const imgs = qa("img", root).filter(isRealGenImg);
+      // 破图也必须与对应模型建立映射，后面才能可靠地五维置「无」。
+      const imgs = qa("img", root).filter(
+        (im) => isRealGenImg(im) || isBrokenModelImg(im)
+      );
       if (!imgs.length) return null;
       if (imgs.length > 4) return null;
       imgs.sort(
         (a, b) =>
-          (b.naturalWidth || b.width) * (b.naturalHeight || b.height) -
-          (a.naturalWidth || a.width) * (a.naturalHeight || a.height)
+          Number(isRealGenImg(b)) - Number(isRealGenImg(a)) ||
+          (b.naturalWidth || b.width || 0) * (b.naturalHeight || b.height || 0) -
+          (a.naturalWidth || a.width || 0) * (a.naturalHeight || a.height || 0)
       );
       return imgs[0];
     };
@@ -379,18 +414,28 @@
     // 2) 前后兄弟
     let sib = labelEl.nextElementSibling;
     for (let i = 0; i < 4 && sib; i++) {
-      const img = grab(sib) || (sib.tagName === "IMG" && isRealGenImg(sib) ? sib : null);
+      const img =
+        grab(sib) ||
+        (sib.tagName === "IMG" && (isRealGenImg(sib) || isBrokenModelImg(sib))
+          ? sib
+          : null);
       if (img) return img;
       sib = sib.nextElementSibling;
     }
     sib = labelEl.previousElementSibling;
     for (let i = 0; i < 4 && sib; i++) {
-      const img = grab(sib) || (sib.tagName === "IMG" && isRealGenImg(sib) ? sib : null);
+      const img =
+        grab(sib) ||
+        (sib.tagName === "IMG" && (isRealGenImg(sib) || isBrokenModelImg(sib))
+          ? sib
+          : null);
       if (img) return img;
       sib = sib.previousElementSibling;
     }
     // 3) 几何最近
-    const allImgs = qa("img").filter(isRealGenImg);
+    const allImgs = qa("img").filter(
+      (im) => isRealGenImg(im) || isBrokenModelImg(im)
+    );
     const lr = labelEl.getBoundingClientRect();
     let best = null;
     let bestD = 1e9;
@@ -466,24 +511,28 @@
       const pool = qa("img", content === document.body ? document.body : content)
         .concat(qa("img"))
         .filter((im, i, arr) => arr.indexOf(im) === i)
-        .filter((im) => {
-          if (usedImgs.has(im)) return false;
-          const w = im.naturalWidth || im.width || 0;
-          return w >= 64 || !!im.src;
-        })
+        .filter((im) => !usedImgs.has(im) && isRealGenImg(im))
         .filter((im) => !/logo|icon|avatar/i.test(im.className + (im.alt || "")));
       // 按文档顺序
       pool.sort((a, b) => (domAfter(a, b) ? -1 : 1));
-      missing.forEach((m) => {
-        const img = pool.shift();
-        if (!img) return;
-        usedImgs.add(img);
-        m.imgEl = img;
-        m.images = [imgToDataURL(img)];
-        m.meta = imgMeta(img);
-        m.strategy = "pool-fill";
-        log(`补图 ${m.id} ← ${m.meta.name} ${m.meta.w}x${m.meta.h}`);
-      });
+      // 数量不完全一致时无法证明一一对应；宁可置「无」，也不能拿别的模型图顶上。
+      if (pool.length === missing.length) {
+        missing.forEach((m) => {
+          const img = pool.shift();
+          if (!img) return;
+          usedImgs.add(img);
+          m.imgEl = img;
+          m.images = [imgToDataURL(img)];
+          m.meta = imgMeta(img);
+          m.strategy = "pool-fill-exact";
+          log(`补图 ${m.id} ← ${m.meta.name} ${m.meta.w}x${m.meta.h}`);
+        });
+      } else {
+        log(
+          `补图取消：缺模型 ${missing.length} / 候选图 ${pool.length}，映射不唯一，将按无图处理`,
+          "err"
+        );
+      }
     }
 
     // 图片加载异常 → 标记 broken，后面五维打「无」

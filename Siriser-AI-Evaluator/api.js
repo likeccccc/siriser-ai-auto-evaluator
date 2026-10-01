@@ -364,6 +364,7 @@
         `每个模型 5 维 1–10 整数：alignment/quality/preservation/consistency/realism；无图输出 null 且 notes="no_image"。\n` +
         `模型列表：${models.map((m) => m.id).join(", ")}\n\n` +
         `【强制】不同模型必须给出不同分数向量，禁止复制粘贴同一套分。\n` +
+        `【形态检查】若指令要求 1:1，必须辨别是正常裁切/扩图，还是把原内容非等比拉伸、压扁后硬塞进正方形；后者五维都要扣分。\n` +
         `每个模型的 notes 必须写出该图特有的一条问题（位置+现象），与其他模型不得相同。\n` +
         `若两图都挺好，也要通过「哪张更好」拉开至少 1 分差距。` +
         (task.histHint || ""),
@@ -402,6 +403,8 @@ alignment 指令遵循, quality 局部质量, preservation 非编辑保持, cons
 写实人像/街拍以真实摄影为准；插画/动漫不按照片扣，但仍扣「风格内假光影/糊脸」。
 
 【专家口径】
+- 输出画布比例正确不代表内容形态正确。要求 1:1 时，应通过裁切、扩图或重构完成，禁止把整张图/人物/物体非等比拉宽或压扁。
+- 对照参考图检查脸宽、头身比、四肢、服装轮廓、圆形物体与背景透视。明显整体挤压时，notes 必须写“非等比缩放/横向拉宽/纵向压扁”；alignment≤6、quality≤5、preservation≤5、consistency≤5、realism≤4。
 - 左右：写「人物左手/右手」按画中人物自身；只写画面左右按观众视角。Prompt 不清做反只轻扣1分，不算严重不遵循。
 - 配件组合（如衬衫+丝巾）：都出现=好；只做一半=轻扣1–2，不连坐其他四维。
 - 模糊指令对了勿重扣；明确指令做错才按上限重扣。
@@ -804,6 +807,30 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     return list;
   }
 
+  /** 相对排名之后再执行，避免明显非等比形变被名次映射重新抬成高分。 */
+  function applyGeometryDistortionCaps(list) {
+    const re = /非等比|比例失真|比例异常|形态失真|横向(?:拉宽|变宽)|纵向(?:压扁|压缩|变短)|整图.{0,4}(?:拉伸|挤压|压扁)|人物.{0,4}(?:拉伸|挤压|压扁)|身体.{0,4}(?:拉伸|挤压|压扁)/i;
+    return list.map((s) => {
+      if (!s || scoreAvg(s) == null) return s;
+      const evidence = `${s.notes || ""} ${JSON.stringify(s.defects || [])}`;
+      if (!re.test(evidence)) return s;
+      const caps = {
+        alignment: 6,
+        quality: 5,
+        preservation: 5,
+        consistency: 5,
+        realism: 4,
+      };
+      DIM_KEYS.forEach((k) => {
+        if (typeof s[k] === "number") s[k] = Math.min(s[k], caps[k]);
+      });
+      if (!/\[形态失真上限\]/.test(String(s.notes || ""))) {
+        s.notes = `${s.notes || "明显非等比形变"} [形态失真上限]`;
+      }
+      return s;
+    });
+  }
+
   /** 双模型：分差小取平均；分差大标记审核 */
   function mergeDualScores(listA, listB, threshold) {
     const mapB = new Map(listB.map((s) => [s.model, s]));
@@ -1089,7 +1116,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         const t = await res.text().catch(() => "");
         throw new Error("API HTTP " + res.status + " " + t.slice(0, 400));
       }
-      return normalizeScores(await res.json());
+      return applyGeometryDistortionCaps(normalizeScores(await res.json()));
     }
 
     // 2) OpenAI 兼容：可选双模型 + 分差审核
@@ -1175,13 +1202,13 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         }
         const reviewed2 = await applyPolicyReview(cleanTask, final, cfg, reviewDeadline);
         // 保序拉开，避免人人 9/8/9/8/7
-        return rankSpreadScores(reviewed2);
+        return applyGeometryDistortionCaps(rankSpreadScores(reviewed2));
       }
 
       const reviewDeadline2 =
         Date.now() + Math.max(20000, Number(cfg.REVIEW_BUDGET_MS) || 90000);
       const reviewed3 = await applyPolicyReview(cleanTask, scoresA, cfg, reviewDeadline2);
-      return rankSpreadScores(reviewed3);
+      return applyGeometryDistortionCaps(rankSpreadScores(reviewed3));
     }
 
     throw new Error("未配置 API_URL 或 OPENAI_API_KEY");
