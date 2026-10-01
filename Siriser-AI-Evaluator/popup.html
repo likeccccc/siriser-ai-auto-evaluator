@@ -33,6 +33,9 @@
     </div>
     <div class="row">
       <button type="button" id="btnTestDing">测试钉钉推送</button>
+      <button type="button" id="btnTestModel">测试模型</button>
+    </div>
+    <div class="row">
       <button type="button" id="btnDiag">诊断选择器</button>
     </div>
     <div class="progress"><i id="prog"></i></div>
@@ -40,42 +43,34 @@
   </section>
 
   <section class="card">
-    <h2>API 配置</h2>
-    <label>API URL（自定义评分服务）
-      <input type="url" id="apiUrl" placeholder="https://your-server/evaluate" />
-    </label>
+    <h2>API 配置（OpenAI 兼容视觉接口）</h2>
     <label>API Key
-      <input type="password" id="apiKey" placeholder="可选 Bearer" />
+      <input type="password" id="oaKey" placeholder="sk-..." />
     </label>
-    <div class="sep">或 OpenAI 兼容视觉接口</div>
     <label>Base URL
-      <input type="url" id="oaBase" placeholder="https://api.openai.com/v1" />
+      <input type="url" id="oaBase" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" />
     </label>
     <label>Model（评委 A）
-      <input type="text" id="oaModel" placeholder="qwen3-vl-32b-instruct" />
+      <input type="text" id="oaModel" placeholder="qwen-vl-max / qwen3.7-plus" />
     </label>
-    <label>Model 2（评委 B，填了则双模型合评）
-      <input type="text" id="oaModel2" placeholder="qwen3.7-plus / 留空=单模型" />
+    <label>Model 2（评委 B，可选；须能看图的 vl 模型）
+      <input type="text" id="oaModel2" placeholder="留空 = 单模型" />
     </label>
     <label>审核模型（分差大时裁决，可选）
       <input type="text" id="oaModelReview" placeholder="qwen-vl-max / 留空=用均值" />
     </label>
-    <label>分差阈值（≥N 分才审核，建议 2）
-      <input type="number" id="dualThreshold" min="1" max="5" value="2" />
+    <label>分差阈值（≥N 分才审核，建议 3）
+      <input type="number" id="dualThreshold" min="1" max="5" value="3" />
     </label>
-    <label>钉钉 Webhook（异常推送，可选）
+    <label>钉钉 Webhook（异常推送）
       <input type="url" id="dingWebhook" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
     </label>
-    <label>API Key
-      <input type="password" id="oaKey" placeholder="sk-..." />
-    </label>
-    <label class="check">
-      <input type="checkbox" id="autoSubmit" checked /> 填完自动提交
-    </label>
-    <label class="check">
-      <input type="checkbox" id="autoNext" checked /> 提交后自动下一题
-    </label>
     <button type="button" class="primary" id="btnSave">保存配置</button>
+    <div class="row">
+      <button type="button" id="btnExportCfg">导出配置</button>
+      <button type="button" id="btnImportCfg">导入配置</button>
+    </div>
+    <input type="file" id="cfgFile" accept="application/json,.json" hidden />
   </section>
 
   <section class="card">

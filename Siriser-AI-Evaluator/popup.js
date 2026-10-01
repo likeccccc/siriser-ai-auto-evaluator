@@ -30,9 +30,11 @@ const DEFAULTS = {
   OPENAI_API_KEY: "",
   OPENAI_MODEL_2: "",
   OPENAI_MODEL_REVIEW: "",
-  DUAL_DIFF_THRESHOLD: 2,
+  DUAL_DIFF_THRESHOLD: 3,
+  MAX_REVIEW: 1,
+  REVIEW_BUDGET_MS: 60000,
   DINGTALK_WEBHOOK: "",
-  AUTO_SUBMIT: true,
+  AUTO_SUBMIT: false,
   AUTO_NEXT: true,
 };
 
@@ -81,18 +83,21 @@ async function loadConfig() {
 }
 
 async function saveConfig() {
+  // 合并已有配置，避免覆盖掉 MAX_REVIEW / TIMEOUT_MS 等未暴露字段
+  const prev = await loadConfig();
   const cfg = {
-    API_URL: $("apiUrl").value.trim(),
-    API_KEY: $("apiKey").value.trim(),
+    ...prev,
+    API_URL: "",
+    API_KEY: "",
     OPENAI_BASE_URL: $("oaBase").value.trim() || DEFAULTS.OPENAI_BASE_URL,
     OPENAI_MODEL: $("oaModel").value.trim() || DEFAULTS.OPENAI_MODEL,
     OPENAI_MODEL_2: $("oaModel2").value.trim(),
     OPENAI_MODEL_REVIEW: $("oaModelReview").value.trim(),
-    DUAL_DIFF_THRESHOLD: Number($("dualThreshold").value) || 2,
+    DUAL_DIFF_THRESHOLD: Number($("dualThreshold").value) || 3,
     DINGTALK_WEBHOOK: $("dingWebhook").value.trim(),
     OPENAI_API_KEY: $("oaKey").value.trim(),
-    AUTO_SUBMIT: $("autoSubmit").checked,
-    AUTO_NEXT: $("autoNext").checked,
+    AUTO_SUBMIT: false,
+    AUTO_NEXT: true,
   };
   await chrome.storage.sync.set({ SIRISER_CONFIG: cfg });
   // 同步到 content 的 window.SIRISER_CONFIG
@@ -114,17 +119,13 @@ async function saveConfig() {
 
 async function initForm() {
   const cfg = await loadConfig();
-  $("apiUrl").value = cfg.API_URL || "";
-  $("apiKey").value = cfg.API_KEY || "";
   $("oaBase").value = cfg.OPENAI_BASE_URL || "";
   $("oaModel").value = cfg.OPENAI_MODEL || "";
   $("oaModel2").value = cfg.OPENAI_MODEL_2 || "";
   $("oaModelReview").value = cfg.OPENAI_MODEL_REVIEW || "";
-  $("dualThreshold").value = cfg.DUAL_DIFF_THRESHOLD != null ? cfg.DUAL_DIFF_THRESHOLD : 2;
+  $("dualThreshold").value = cfg.DUAL_DIFF_THRESHOLD != null ? cfg.DUAL_DIFF_THRESHOLD : 3;
   $("dingWebhook").value = cfg.DINGTALK_WEBHOOK || "";
   $("oaKey").value = cfg.OPENAI_API_KEY || "";
-  $("autoSubmit").checked = !!cfg.AUTO_SUBMIT;
-  $("autoNext").checked = !!cfg.AUTO_NEXT;
 }
 
 async function sendToPage(msg) {
@@ -138,6 +139,65 @@ $("btnSave").addEventListener("click", async () => {
     await saveConfig();
   } catch (e) {
     setStatus("保存失败：" + e.message, "err");
+  }
+});
+
+/** 导出配置 JSON（含 Key，便于移除扩展后恢复） */
+$("btnExportCfg").addEventListener("click", async () => {
+  try {
+    const cfg = await loadConfig();
+    const blob = new Blob([JSON.stringify(cfg, null, 2)], {
+      type: "application/json",
+    });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "siriser-evaluator-config.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setStatus("配置已导出", "ok");
+  } catch (e) {
+    setStatus("导出失败：" + e.message, "err");
+  }
+});
+
+$("btnImportCfg").addEventListener("click", () => $("cfgFile").click());
+
+$("cfgFile").addEventListener("change", async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error("不是有效的配置 JSON");
+    }
+    const cfg = {
+      ...DEFAULTS,
+      ...data,
+      // 导入后仍走 OpenAI 兼容路径
+      API_URL: "",
+      API_KEY: "",
+      AUTO_SUBMIT: false,
+      AUTO_NEXT: true,
+    };
+    await chrome.storage.sync.set({ SIRISER_CONFIG: cfg });
+    await initForm();
+    try {
+      const tab = await getActiveTab();
+      if (tab && tab.id) {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: (c) => {
+            window.SIRISER_CONFIG = Object.assign(window.SIRISER_CONFIG || {}, c);
+          },
+          args: [cfg],
+        });
+      }
+    } catch (_) {}
+    setStatus("配置已导入", "ok");
+  } catch (err) {
+    setStatus("导入失败：" + err.message, "err");
   }
 });
 
@@ -207,6 +267,173 @@ async function evalFlow(onlyCurrent, batchSize) {
 $("btnEval1").addEventListener("click", () => evalFlow(false, 1));
 $("btnEval3").addEventListener("click", () => evalFlow(false, 3));
 $("btnEvalOne").addEventListener("click", () => evalFlow(true, 1));
+
+/** 生成一张可辨识的测试图（蓝底+红圆+黄方块），用于验证模型能收图 */
+function makeTestImage() {
+  const c = document.createElement("canvas");
+  c.width = 256;
+  c.height = 256;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#1a4a8a";
+  ctx.fillRect(0, 0, 256, 256);
+  ctx.fillStyle = "#e23b2e";
+  ctx.beginPath();
+  ctx.arc(128, 128, 72, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#f5c518";
+  ctx.fillRect(16, 16, 48, 48);
+  return c.toDataURL("image/jpeg", 0.85);
+}
+
+function parseTestJson(text) {
+  const raw = String(text || "").trim();
+  try {
+    return JSON.parse(raw);
+  } catch (_) {}
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (m) {
+    try {
+      return JSON.parse(m[0]);
+    } catch (_) {}
+  }
+  return null;
+}
+
+/** 测试当前表单里的评委 A：发一张测试图，看能否收图并返回打分 JSON */
+$("btnTestModel").addEventListener("click", async () => {
+  try {
+    await saveConfig();
+    const cfg = await loadConfig();
+    const key = String(cfg.OPENAI_API_KEY || "").trim();
+    const model = String(cfg.OPENAI_MODEL || "").trim();
+    const base = String(cfg.OPENAI_BASE_URL || "").trim().replace(/\/+$/, "");
+    if (!key) {
+      setStatus("请先填写 API Key 并保存", "err");
+      $("preview").textContent = "缺少 OPENAI_API_KEY";
+      return;
+    }
+    if (!model) {
+      setStatus("请先填写 Model（评委 A）", "err");
+      $("preview").textContent = "缺少 OPENAI_MODEL";
+      return;
+    }
+    setStatus(`测试模型 ${model} 收图打分…`, "busy");
+    setProg(25);
+
+    const img = makeTestImage();
+    const body = {
+      model,
+      max_tokens: 300,
+      temperature: 0,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text:
+                "这是评分接口连通性测试图。请确认能否看到图片，然后按评分格式输出。\n" +
+                '只输出 JSON：{"see_image":true,"main_color":"图中最显眼的颜色","score":1-10,"note":"一句话"}\n' +
+                "若看不到图片，see_image 填 false，score 填 null。",
+            },
+            { type: "image_url", image_url: { url: img } },
+          ],
+        },
+      ],
+    };
+    if (/qwen/i.test(model)) {
+      body.enable_thinking = false;
+      body.thinking = { type: "disabled" };
+      body.extra_body = { enable_thinking: false };
+    }
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 60000);
+    let res;
+    try {
+      res = await fetch(base + "/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + key,
+        },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const rawText = await res.text().catch(() => "");
+    setProg(70);
+    if (!res.ok) {
+      const short = rawText.slice(0, 280);
+      let hint = "";
+      if (/unexpected item type|invalid.*content/i.test(rawText)) {
+        hint = "→ 该模型拒收图片（非视觉模型）。请换成带 vl 的模型，例如 qwen-vl-max / qwen3-vl-32b-instruct。";
+      } else if (res.status === 403 || res.status === 401) {
+        hint = "→ 无权限/Key 不对。请检查 API Key 与已开通的模型。";
+      } else if (res.status === 429) {
+        hint = "→ 触发限速，稍后再试。";
+      } else if (res.status === 400) {
+        hint = "→ 参数被拒。若模型名写错或不是 chat/completions 兼容接口，会出这个错。";
+      }
+      setStatus(`测试失败 HTTP ${res.status}`, "err");
+      $("preview").textContent =
+        `模型：${model}\nBase：${base}\nHTTP ${res.status}\n${short}\n${hint}`;
+      return;
+    }
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (_) {
+      setStatus("响应不是 JSON", "err");
+      $("preview").textContent = rawText.slice(0, 400);
+      return;
+    }
+    const content =
+      (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) ||
+      "";
+    const parsed = parseTestJson(content);
+    const see = parsed && (parsed.see_image === true || parsed.see_image === "true");
+    const score = parsed && parsed.score != null ? parsed.score : "—";
+    const color = (parsed && parsed.main_color) || "—";
+    const note = (parsed && parsed.note) || "";
+
+    if (see) {
+      setStatus(`模型可用 · 出分 ${score}`, "ok");
+      setProg(100);
+    } else {
+      setStatus("模型回了 JSON 但未看到图", "err");
+      setProg(100);
+    }
+    $("preview").textContent = [
+      `模型：${model}`,
+      `Base：${base}`,
+      `见图：${see ? "是" : "否"}`,
+      `主色：${color}`,
+      `测试分：${score}`,
+      note ? `备注：${note}` : "",
+      "",
+      "---- 原始回复 ----",
+      String(content).slice(0, 500),
+    ]
+      .filter(Boolean)
+      .join("\n");
+  } catch (e) {
+    setProg(0);
+    const msg = String(e && e.message) || String(e);
+    if (/abort/i.test(msg)) {
+      setStatus("测试超时（60s）", "err");
+      $("preview").textContent =
+        "请求超时。模型可能过慢，或 Base URL 不通。\n" + msg;
+    } else {
+      setStatus("测试失败：" + msg, "err");
+      $("preview").textContent = msg;
+    }
+  }
+});
 
 $("btnTestDing").addEventListener("click", async () => {
   try {

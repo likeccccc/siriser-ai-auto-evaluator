@@ -305,16 +305,27 @@
       const limit = timeoutMs || 15000;
       for (;;) {
         const labels = findModelLabels();
+        // 标签左右各一份会重复，必须按去重模型数判断，否则永远等不齐
+        const ids = new Set(
+          labels
+            .map((h) => extractModelId(h.raw || textOf(h.el) || ""))
+            .filter(Boolean)
+        );
+        const need = ids.size || labels.length || 1;
         const bigImgs = qa("img").filter(isRealGenImg).length;
-        if (labels.length && bigImgs >= labels.length) {
-          log(`图片就绪 labels=${labels.length} imgs=${bigImgs}`);
+        if (bigImgs >= need) {
+          log(`图片就绪 models=${need} imgs=${bigImgs}`);
           return true;
         }
         if (Date.now() - t0 > limit) {
-          log(`等图超时 labels=${labels.length || 0} imgs=${bigImgs}`, "err");
+          log(`等图超时 models=${need} imgs=${bigImgs}`, "err");
+          notifyAbnormal(
+            "等图超时",
+            `模型 ${need} / 大图 ${bigImgs}，${fmtDur(limit)} 内未就绪，将继续评分（可能缺图）`
+          ).catch(() => {});
           return false;
         }
-        await sleep(500);
+        await sleep(400);
       }
     } catch (e) {
       log("等图异常(忽略)：" + (e && e.message));
@@ -1329,6 +1340,10 @@
         // 点之前确认五维目标不是同一个元素
         fireClick(target);
         markSelected(target);
+        // 自动模式用时近半 → 赶工，缩短拟人间隔，避免点完就撞总时长
+        if (_autoScoreT0 && Date.now() - _autoScoreT0 > _autoScoreTargetMs * 0.45) {
+          _rushClicks = true;
+        }
         const gap = await humanClickDelay();
         if (gap > 500) log(`拟人间隔 ${gap}ms`);
         log(`点击 ${s.model} ${dim}→${v}`);
@@ -1621,6 +1636,8 @@
       );
     } catch (e) {
       log("API 失败：" + e.message, "err");
+      setStatusDock("API 失败", shortErr(e.message), "err");
+      // 不在此处推钉钉：由外层（自动循环 / 悬浮球 / popup）统一推一次，避免重复
       throw e;
     }
     if (!Array.isArray(scores) || !scores.length) {
@@ -1756,6 +1773,19 @@
     return dock;
   }
 
+  /** 状态条错误文案：短、人话，不甩完整堆栈/参数 */
+  function shortErr(msg) {
+    const s = String(msg || "").replace(/\s+/g, " ").trim();
+    if (!s) return "出错了";
+    if (/未配置 API|OPENAI_API_KEY/.test(s)) return "未配置 API";
+    if (/拒收多模态|Unexpected item type/i.test(s)) return "模型不支持看图";
+    if (/无权限|403|401|Access denied/i.test(s)) return "无权限或 Key 无效";
+    if (/超时|timeout|abort/i.test(s)) return "请求超时";
+    if (/429|限速|rate limit/i.test(s)) return "触发限速";
+    if (/缺分|missing/i.test(s)) return "有模型缺分";
+    return s.slice(0, 24);
+  }
+
   function setStatusDock(stage, detail, tone) {
     const dock = ensureStatusDock();
     dock.classList.add("show", "live");
@@ -1783,18 +1813,51 @@
     window.SIRISER_STATUS_HIDE = hideStatusDock;
   } catch (_) {}
 
+  function sendRuntimeMsg(msg) {
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage(msg, (res) => {
+          const err = chrome.runtime.lastError;
+          if (err) {
+            log("runtime: " + err.message, "err");
+            resolve(null);
+            return;
+          }
+          resolve(res || null);
+        });
+      } catch (e) {
+        log("runtime 异常：" + (e && e.message), "err");
+        resolve(null);
+      }
+    });
+  }
+
+  /**
+   * 统一异常钉钉出口：所有「非用户主动取消」的停止/超时/失败都必须 await 调这里。
+   * 用户手动关自动、取消倒计时 → 不要调用。
+   */
+  async function notifyAbnormal(title, reason) {
+    const text =
+      String(title || "异常") +
+      "\n" +
+      String(reason || "") +
+      "\n请打开标注页核对/处理";
+    try {
+      return await notifyDingTalk(text);
+    } catch (e) {
+      log("异常推送失败：" + (e && e.message), "err");
+      return false;
+    }
+  }
+
   async function notifyDingTalk(text) {
     try {
       await loadConfigFromStorage();
       const hook = String((CFG && CFG.DINGTALK_WEBHOOK) || "").trim();
       if (!hook || !/^https?:\/\//i.test(hook)) {
-        log("未配置钉钉 Webhook，跳过推送");
+        log("未配置钉钉 Webhook，跳过推送", "err");
         return false;
       }
-      // 先 ping 唤醒 service worker
-      try {
-        await chrome.runtime.sendMessage({ type: "SIRISER_BG_PING" });
-      } catch (_) {}
       const body =
         "【Siriser 标注异常】\n" +
         text.slice(0, 800) +
@@ -1802,13 +1865,26 @@
         location.href.slice(0, 120) +
         "\n时间：" +
         new Date().toLocaleString();
-      const res = await chrome.runtime.sendMessage({
+
+      let res = await sendRuntimeMsg({
         type: "SIRISER_DINGTALK",
         webhook: hook,
         text: body,
       });
       if (!res) {
-        log("钉钉推送失败：后台无响应（请重新加载扩展）", "err");
+        log("钉钉：后台无响应，再试一次", "err");
+        await sleep(300);
+        res = await sendRuntimeMsg({
+          type: "SIRISER_DINGTALK",
+          webhook: hook,
+          text: body,
+        });
+      }
+      if (!res) {
+        log(
+          "钉钉推送失败：后台无响应。请在 chrome://extensions 移除扩展后重新「加载已解压」",
+          "err"
+        );
         return false;
       }
       const ok = !!res.ok;
@@ -1833,9 +1909,11 @@
     _cancelSubmit = false;
     saveAutoState({ on: false, phase: "off", submitAt: null, reason: reason || "stopped", at: Date.now() });
     log("全自动停止：" + (reason || ""));
-    // 用户手动关不推送；异常停止才推钉钉
+    // 用户手动关不推送；异常停止才推钉钉（必须 await）
     if (!silent) {
-      notifyDingTalk("全自动已停止\n" + (reason || "异常"));
+      try {
+        await notifyAbnormal("全自动已停止", reason || "异常");
+      } catch (_) {}
       try {
         alert("Siriser 全自动已停止：\n" + (reason || "异常"));
       } catch (_) {}
@@ -1944,6 +2022,9 @@
     // 本题目标：从开始评分到提交，总时长随机 6–8 分钟
     const t0 = Date.now();
     const targetMs = randTotalMs();
+    _autoScoreT0 = t0;
+    _autoScoreTargetMs = targetMs;
+    _rushClicks = false;
     log(`本题目标总时长 ${fmtDur(targetMs)}（含评分+勾选+等待）`);
 
     await waitImagesSafe(20000);
@@ -1966,10 +2047,10 @@
           break;
         }
         retries += 1;
-        log(`全自动：缺分 ${missing.join(",")} → 重评 ${retries}/2`, "err");
+        log(`全自动：缺分 ${missing.join(",")} → 最多再重评 1 次`, "err");
         if (retries >= 2) {
           clearCountdownInPanel();
-          await stopAuto(`连续 2 次重评仍缺分：${missing.join(",")}`);
+          await stopAuto(`重评后仍缺分：${missing.join(",")}`);
           return false;
         }
         await sleep(2500);
@@ -1977,16 +2058,10 @@
     } catch (e) {
       // API/执行异常：整段停止，不再循环下一题（防死循环）
       clearCountdownInPanel();
-      saveAutoState({ on: false, phase: "off", submitAt: null, taskKey: null });
       log("API/执行异常，自动已停止：" + (e && e.message), "err");
       toastMsg("API 异常，自动已停止，请改配置后再启动");
-      setStatusDock("已停止", String((e && e.message) || "").slice(0, 60), "err");
-      notifyDingTalk("API/执行异常，自动已停止\n" + (e && e.message));
-      try {
-        alert("Siriser 自动已停止：\n" + ((e && e.message) || "异常"));
-      } catch (_) {}
-      _autoRunning = false;
-      _autoGen += 1;
+      setStatusDock("已停止", shortErr((e && e.message) || ""), "err");
+      await stopAuto("API/执行异常：" + ((e && e.message) || "未知错误"));
       return false;
     }
 
@@ -1996,26 +2071,37 @@
     const wait = targetMs - elapsed;
     setStatusDock("等待提交", `已用 ${fmtDur(elapsed)} / ${fmtDur(targetMs)}`, "ok");
 
-    // 已经超过 6–8 分钟目标 → 停止自动，不自动交，也不重跑本题
+    // 已经超过 6–8 分钟目标：
+    // 评分本身就慢时（日志常见 20–35s/张）硬判超时不合理——分数已出来，应在短等后提交。
+    // 仅当超过 15 分钟硬上限才停止并钉钉。
+    let effectiveTarget = targetMs;
     if (wait <= 0) {
-      clearCountdownInPanel();
-      saveAutoState({ on: false, phase: "off", submitAt: null, taskKey: null });
-      _autoRunning = false;
-      _autoGen += 1;
+      if (elapsed >= TOTAL_HARD_CAP_MS) {
+        clearCountdownInPanel();
+        log(
+          `已超硬上限 elapsed=${fmtDur(elapsed)} ≥ ${fmtDur(TOTAL_HARD_CAP_MS)}，停止自动并等待人工`,
+          "err"
+        );
+        toastMsg("超过 15 分钟硬上限，已停止自动，请人工核对后提交");
+        setStatusDock("已暂停", "超时，等待人工提交", "err");
+        updateCountdownInPanel("已超时 · 未自动提交", true);
+        await stopAuto(
+          `运行超时未提交：用时 ${fmtDur(elapsed)} 超过硬上限 ${fmtDur(TOTAL_HARD_CAP_MS)}，请人工核对后提交`
+        );
+        return false;
+      }
+      // 评分拖长 → 目标顺延到「刚评完 + 45–90s 短等」，仍自动交
+      const extend = 45000 + Math.floor(Math.random() * 45001);
+      effectiveTarget = Math.min(TOTAL_HARD_CAP_MS, elapsed + extend);
       log(
-        `已超目标时长 elapsed=${fmtDur(elapsed)} > ${fmtDur(targetMs)}，停止自动并等待人工`,
-        "err"
+        `评分/勾选已用 ${fmtDur(elapsed)} 超过原目标 ${fmtDur(targetMs)}，顺延到 ${fmtDur(effectiveTarget)} 后提交（不中断）`
       );
-      toastMsg("超过 6–8 分钟，已停止自动，请人工核对后提交");
-      setStatusDock("已暂停", "超时，等待人工提交", "err");
-      updateCountdownInPanel("已超时 · 未自动提交", true);
-      notifyDingTalk(
-        `超时停止：用时 ${fmtDur(elapsed)} 超过目标 ${fmtDur(targetMs)}，未自动提交`
-      );
-      return false;
+      toastMsg("评分较慢，总时长已顺延，稍后自动提交");
+      setStatusDock("等待提交", `顺延 · 已用 ${fmtDur(elapsed)}`, "ok");
     }
+    const wait2 = Math.max(0, effectiveTarget - elapsed);
 
-    const deadline = Date.now() + wait;
+    const deadline = Date.now() + wait2;
     const taskKey = (taskPromptKey() || "t") + "@" + Date.now();
     _cancelSubmit = false;
     saveAutoState({
@@ -2026,7 +2112,7 @@
       batchSize: Number(CFG.AUTO_BATCH) || 3,
     });
     log(
-      `全自动：评分+勾选用时 ${fmtDur(elapsed)}，再等 ${fmtDur(wait)} 提交（合计约 ${fmtDur(targetMs)}）`
+      `全自动：评分+勾选用时 ${fmtDur(elapsed)}，再等 ${fmtDur(wait2)} 提交（合计约 ${fmtDur(effectiveTarget)}）`
     );
 
     while (Date.now() < deadline) {
@@ -2046,7 +2132,7 @@
       const left = deadline - Date.now();
       const totalUsed = Date.now() - t0;
       updateCountdownInPanel(
-        `${fmtDur(left)} 后自动提交 · 已用 ${fmtDur(totalUsed)}/${fmtDur(targetMs)}`,
+        `${fmtDur(left)} 后自动提交 · 已用 ${fmtDur(totalUsed)}/${fmtDur(effectiveTarget)}`,
         left < 30 * 1000
       );
       await sleep(1000);
@@ -2075,8 +2161,13 @@
       taskKey: null,
       batchSize: Number(CFG.AUTO_BATCH) || 3,
     });
-    if (!ok) log("全自动：提交按钮未找到", "err");
-    else log(`全自动：已提交 · 总用时 ${fmtDur(Date.now() - t0)}`, "ok");
+    if (!ok) {
+      log("全自动：提交按钮未找到", "err");
+      setStatusDock("提交失败", "未找到提交按钮", "err");
+      await stopAuto("提交按钮未找到，未自动提交，请人工提交本题");
+      return false;
+    }
+    log(`全自动：已提交 · 总用时 ${fmtDur(Date.now() - t0)}`, "ok");
     return ok;
   }
 
@@ -2088,10 +2179,17 @@
     }
   }
 
-  /** 本题总时长目标：随机 6–8 分钟（含评分+勾选+等待） */
+  /**
+   * 本题总时长目标：随机 6–8 分钟（含评分+勾选+等待）。
+   * 硬上限 15 分钟：评分模型慢时仍尽量在「像人」的窗口内交，而不是直接判超时。
+   */
   function randTotalMs() {
     return 6 * 60 * 1000 + Math.floor(Math.random() * 2 * 60 * 1000 + 1);
   }
+  const TOTAL_HARD_CAP_MS = 15 * 60 * 1000;
+  let _rushClicks = false;
+  let _autoScoreT0 = 0;
+  let _autoScoreTargetMs = 0;
 
   async function autoLoop() {
     if (_autoRunning) return;
@@ -2183,6 +2281,7 @@
     await loadConfigFromStorage();
     if (!CFG.API_URL && !CFG.OPENAI_API_KEY) {
       toastMsg("请先配置 API");
+      await notifyAbnormal("启动失败", "未配置 API（Base URL / API Key）");
       throw new Error("未配置 API");
     }
     const prev = await loadAutoState();
@@ -2469,10 +2568,15 @@
           return;
         }
         if (msg.type === "SIRISER_EVAL") {
-          const scores = await runAutoScore(!!msg.onlyCurrent, {
-            batchSize: msg.batchSize || 1,
-          });
-          sendResponse({ ok: true, scores });
+          try {
+            const scores = await runAutoScore(!!msg.onlyCurrent, {
+              batchSize: msg.batchSize || 1,
+            });
+            sendResponse({ ok: true, scores });
+          } catch (e) {
+            await notifyAbnormal("评分失败（popup）", e && e.message);
+            throw e;
+          }
           return;
         }
         if (msg.type === "SIRISER_SUBMIT") {
@@ -2535,7 +2639,7 @@
     if (lb) lb.textContent = on ? "已开启拟人点击（2–4s/格）" : "已关闭拟人点击";
   }
 
-  /** 拟人间隔：1.2–3.2 秒；模式缓存，避免每点一次都读 storage */
+  /** 拟人间隔：默认 1.0–2.6 秒；赶工时 0.2–0.4 秒。模式缓存，避免每点一次都读 storage */
   let _humanModeCached = null;
   async function humanClickDelay() {
     if (_humanModeCached == null) {
@@ -2545,7 +2649,12 @@
       await sleep(60);
       return 60;
     }
-    const ms = 1200 + Math.floor(Math.random() * 2001);
+    if (_rushClicks) {
+      const ms = 180 + Math.floor(Math.random() * 220);
+      await sleep(ms);
+      return ms;
+    }
+    const ms = 1000 + Math.floor(Math.random() * 1600);
     await sleep(ms);
     return ms;
   }
@@ -2862,6 +2971,10 @@
         setBusy(false, "");
         const msg = String(err.message || err);
         log("失败：" + msg, "err");
+        setStatusDock("评分失败", shortErr(msg), "err");
+        try {
+          await notifyAbnormal("评分失败", msg);
+        } catch (_) {}
         const d = diagnose();
         const logTail = dumpLogs().split("\n").slice(-20).join("\n");
         diagBody.innerHTML =

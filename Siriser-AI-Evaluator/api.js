@@ -39,25 +39,62 @@
     "realism",
   ];
 
+  /**
+   * 状态条专用：从日志里提炼用户能看懂的短句。
+   * 不要透传原始日志（含 超时=300s / model=xxx 等，容易误判）。
+   */
+  function friendlyDetail(msg) {
+    const s = String(msg || "");
+    let m;
+    if ((m = s.match(/进度\s*(\d+)\s*\/\s*(\d+)/))) {
+      return `进度 ${m[1]}/${m[2]}`;
+    }
+    if ((m = s.match(/请求\s+([A-Za-z0-9]+(?:\s*,\s*[A-Za-z0-9]+)*)\s/))) {
+      return `正在评 ${m[1].replace(/\s+/g, "")}`;
+    }
+    if (/响应\s+/.test(s)) {
+      if ((m = s.match(/→\s*(\d+)\s*条/))) return `已出 ${m[1]} 个模型分`;
+      return "已收到打分";
+    }
+    if (/审核/.test(s)) {
+      return "审核分歧中";
+    }
+    if (/ref 压缩|img\s+/.test(s) || /压缩/.test(s)) {
+      return "处理图片中";
+    }
+    if (/致命|无权限|API失败|HTTP\s*[45]|拒收|403|400|429|失败/.test(s)) {
+      return s
+        .replace(/model=[^\s]+/gi, "")
+        .replace(/超时=\S+/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 36);
+    }
+    return "";
+  }
+
   function slog(msg) {
     try {
       if (global.SIRISER_PAGE_LOG) global.SIRISER_PAGE_LOG(msg);
       else console.log("[Siriser]", msg);
     } catch (_) {}
-    // 同步到底部状态条
+    // 状态条只同步「阶段 + 友好短句」
     try {
       if (global.SIRISER_SET_STATUS) {
         const s = String(msg || "");
-        if (/评委A|judgeA|plus/.test(s) && /请求|进度/.test(s)) {
-          global.SIRISER_SET_STATUS("评委A 打分", s, "");
-        } else if (/评委B|judgeB|max-2026|审核/.test(s) && /请求|进度|审核/.test(s)) {
-          global.SIRISER_SET_STATUS("评委B / 审核", s, "");
-        } else if (/进度 \d+\/\d+/.test(s)) {
-          global.SIRISER_SET_STATUS("大模型打分", s, "");
-        } else if (/压缩|压图|img /.test(s)) {
-          global.SIRISER_SET_STATUS("压缩图片", s, "");
-        } else if (/HTTP4|失败|无权限|403|400|429/.test(s)) {
-          global.SIRISER_SET_STATUS("API 异常", s, "err");
+        const detail = friendlyDetail(s);
+        if (/进度\s*\d+\s*\/\s*\d+/.test(s) || /\[\s*\S+\s*\]\s*进度/.test(s)) {
+          global.SIRISER_SET_STATUS("大模型打分", detail || "打分中", "");
+        } else if (/^请求\s+/.test(s)) {
+          global.SIRISER_SET_STATUS("大模型打分", detail || "请求中", "");
+        } else if (/^响应\s+/.test(s)) {
+          global.SIRISER_SET_STATUS("大模型打分", detail || "已出分", "");
+        } else if (/审核\s+\S+\s*→/.test(s) || /待审|审核完成|审核失败|审核超|审核裁剪/.test(s)) {
+          global.SIRISER_SET_STATUS("审核分歧", detail || "审核中", "");
+        } else if (/ref 压缩|img\s+\S+\s+(ok|FAIL|图过小)/.test(s)) {
+          global.SIRISER_SET_STATUS("压缩图片", "处理图片中", "");
+        } else if (/致命|无权限|API失败|HTTP\s*[45]|拒收|本批失败|超时：/.test(s)) {
+          global.SIRISER_SET_STATUS("API 异常", detail || "评分出错", "err");
         }
       }
     } catch (_) {}
@@ -437,41 +474,35 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     if (res.status === 400) {
       const errText = await res.text().catch(() => "");
       slog("HTTP400 " + errText.slice(0, 140));
+      // 模型根本不认图片：立刻失败，禁止纯文本瞎猜（浪费 token）
+      if (/unexpected item type|invalid.*content/i.test(errText)) {
+        const err = new Error(
+          "API失败：模型" + modelName + " 拒收多模态内容（Unexpected item type）。请换带 vl 的视觉模型。"
+        );
+        err.fatal = true;
+        throw err;
+      }
       delete body.response_format;
       delete body.enable_thinking;
       delete body.thinking;
       delete body.extra_body;
-      // Unexpected item type：该模型可能不收 image_url，改成纯文本重试
-      if (/unexpected item type|invalid.*content/i.test(errText)) {
-        slog("该模型拒收多模态 parts，改纯文本重试");
-        const textOnly = sanitizeParts(content).filter((p) => p.type === "text");
-        body.messages = [
-          {
-            role: "system",
-            content: global.SCORING_SYSTEM_PROMPT || SHORT_SYSTEM,
-          },
-          {
-            role: "user",
-            content: textOnly.map((p) => p.text).join("\n") + "\n（图片未随请求，若无法判断请按 notes=no_image）",
-          },
-        ];
-        res = await doPost(body);
-      } else if (/enable_thinking|thinking parameter/i.test(errText)) {
-        // 有的模型强制 thinking=True，去掉参数再试
+      if (/enable_thinking|thinking parameter/i.test(errText)) {
         slog("该模型强制 enable_thinking，去掉参数重试");
-        res = await doPost(body);
-      } else {
-        res = await doPost(body);
       }
+      res = await doPost(body);
       if (!res.ok) {
         const t2 = await res.text().catch(() => "");
-        throw new Error("OpenAI HTTP " + res.status + " " + t2.slice(0, 400));
+        const err = new Error("API失败 HTTP " + res.status + " " + t2.slice(0, 300));
+        err.fatal = true;
+        throw err;
       }
     }
 
     if (!res.ok) {
       const t = await res.text().catch(() => "");
-      throw new Error("OpenAI HTTP " + res.status + " " + t.slice(0, 400));
+      const err = new Error("API失败 HTTP " + res.status + " " + t.slice(0, 300));
+      err.fatal = res.status === 403 || res.status === 401 || res.status === 400;
+      throw err;
     }
 
     const data = await res.json();
@@ -494,22 +525,38 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     const batchSize = Math.max(1, Number(cfg.BATCH_SIZE) || 1);
     const total = Math.ceil(cleanTask.models.length / batchSize);
     const subCfg = { ...cfg, OPENAI_MODEL: modelName };
-    let step = 0;
+    // 逐张/合评都可并发，避免 6 次串行 ×40s+
+    const parallel = Math.max(1, Math.min(3, Number(cfg.PARALLEL) || 2));
+
+    const batches = [];
     for (let i = 0; i < cleanTask.models.length; i += batchSize) {
-      const batch = cleanTask.models.slice(i, i + batchSize);
+      batches.push(cleanTask.models.slice(i, i + batchSize));
+    }
+
+    let step = 0;
+    let cursor = 0;
+    let fatalErr = null;
+
+    async function runOne(batch) {
       step += 1;
-      if (i > 0) await new Promise((r) => setTimeout(r, batchSize >= 3 ? 800 : 500));
       slog(`[ ${modelName} ] 进度 ${step}/${total} …`);
+      if (parallel > 1) await new Promise((r) => setTimeout(r, 200));
       let part = null;
       try {
         part = await callOpenAIBatch(cleanTask, batch, subCfg);
       } catch (e) {
         const msg = String(e && e.message);
+        if (e && e.fatal) {
+          slog("致命错误，停止评分：" + msg, "err");
+          throw e;
+        }
         if (/403|access_denied/i.test(msg)) {
           slog("无权限(403)：" + msg.slice(0, 120), "err");
-          throw new Error(
+          const err = new Error(
             "模型无权限(403)：" + modelName + "。请改成已开通的视觉模型（如 qwen-vl-max）。"
           );
+          err.fatal = true;
+          throw err;
         }
         if (/429|rate limit/i.test(msg)) {
           slog("触发限速，等待 5s 重试");
@@ -518,11 +565,16 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
             part = await callOpenAIBatch(cleanTask, batch, subCfg);
           } catch (e2) {
             slog("重试仍失败：" + (e2 && e2.message), "err");
+            throw e2;
           }
         } else if (/abort|timeout/i.test(msg)) {
-          slog("超时：" + batch.map((m) => m.id).join(",") + "，跳过本批", "err");
+          slog("超时：" + batch.map((m) => m.id).join(",") + "，停止本模型", "err");
+          const err = new Error(msg);
+          err.fatal = true;
+          throw err;
         } else {
           slog("本批失败：" + msg, "err");
+          throw e;
         }
       }
       if (part) {
@@ -533,6 +585,45 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         });
       }
     }
+
+    async function worker() {
+      while (cursor < batches.length && !fatalErr) {
+        const idx = cursor++;
+        const batch = batches[idx];
+        try {
+          await runOne(batch);
+        } catch (e) {
+          if (e && e.fatal) {
+            fatalErr = e;
+            return;
+          }
+          fatalErr = e;
+          return;
+        }
+      }
+    }
+
+    if (parallel <= 1) {
+      for (let i = 0; i < batches.length; i++) {
+        if (fatalErr) break;
+        try {
+          await runOne(batches[i]);
+        } catch (e) {
+          fatalErr = e;
+          break;
+        }
+        if (i > 0 && batchSize >= 3) {
+          await new Promise((r) => setTimeout(r, 800));
+        } else if (i > 0) {
+          await new Promise((r) => setTimeout(r, 500));
+        }
+      }
+    } else {
+      slog(`并发打分 x${parallel}`);
+      await Promise.all(Array.from({ length: parallel }, () => worker()));
+    }
+    if (fatalErr) throw fatalErr;
+
     return wanted.map((id) => {
       const hit = byId.get(id);
       if (hit) return hit;
@@ -683,7 +774,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     });
   }
 
-  async function applyPolicyReview(cleanTask, scores, cfg) {
+  async function applyPolicyReview(cleanTask, scores, cfg, deadline) {
     const hit = pickPolicyReview(scores);
     if (!hit.length) return scores;
     slog(`规则审核触发 ${hit.map((h) => h.model + " " + h._policy).join(" | ")}`);
@@ -694,7 +785,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       });
       return scores;
     }
-    const reviewed = await reviewScores(cleanTask, hit, cfg);
+    const reviewed = await reviewScores(cleanTask, hit, cfg, deadline);
     const map = new Map(reviewed.map((s) => [s.model, s]));
     return scores.map((s) => {
       const r = map.get(s.model);
@@ -706,12 +797,65 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     });
   }
 
-  /** 分差大时：审核模型在两套分里裁决 */
-  async function reviewScores(cleanTask, items, cfg) {
+  /**
+   * 审核次数上限 + 时间预算，防止 15 个模型各审 2 分钟导致超时。
+   * 优先审分差最大的；deadline 可跨多次 reviewScores 共用。
+   */
+  function capReviewList(items, cfg, deadline) {
+    const max = Math.max(0, Number(cfg.MAX_REVIEW ?? 3));
+    if (deadline && Date.now() > deadline) {
+      slog("审核时间预算用完，跳过剩余审核");
+      return [];
+    }
+    const list = (items || [])
+      .slice()
+      .sort((x, y) => (Number(y._diff) || 0) - (Number(x._diff) || 0));
+    if (list.length > max) {
+      slog(
+        `审核裁剪到 ${max} 个（按分差优先：${list
+          .slice(0, max)
+          .map((x) => x.model + "±" + (x._diff || 0))
+          .join(",")}）`
+      );
+      return list.slice(0, max);
+    }
+    return list;
+  }
+
+  async function reviewScores(cleanTask, items, cfg, deadline) {
     const revModel = cfg.OPENAI_MODEL_REVIEW;
     if (!revModel || !items.length) return items;
+    if (!deadline) {
+      deadline = Date.now() + Math.max(20000, Number(cfg.REVIEW_BUDGET_MS) || 90000);
+    }
+    const queue = capReviewList(items, cfg, deadline);
     const out = [];
-    for (const item of items) {
+    const skipped = items.filter((x) => !queue.includes(x));
+    skipped.forEach((item) => {
+      out.push({
+        model: item.model,
+        alignment: item.alignment,
+        quality: item.quality,
+        preservation: item.preservation,
+        consistency: item.consistency,
+        realism: item.realism,
+        notes: ((item.notes || "") + " [未审核保留均值]").trim(),
+      });
+    });
+    for (const item of queue) {
+      if (Date.now() > deadline) {
+        slog("审核超预算，剩余改用均值");
+        out.push({
+          model: item.model,
+          alignment: item.alignment,
+          quality: item.quality,
+          preservation: item.preservation,
+          consistency: item.consistency,
+          realism: item.realism,
+          notes: ((item.notes || "") + " [审核超时用均值]").trim(),
+        });
+        continue;
+      }
       const one = cleanTask.models.find((m) => normModelId(m.id) === item.model);
       if (!one) {
         out.push(item);
@@ -791,7 +935,8 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     // 图统一压到小 JPEG，避免 Multimodal file size is too large
     // 逐张 768；合评 3 张时用 576，控制总 payload
     const batchSizeHint = Math.max(1, Number(cfg.BATCH_SIZE) || 1);
-    const maxEdge = batchSizeHint >= 3 ? 576 : 768;
+    // 略压图加快 VL 推理：逐张 640 / 合评 512
+    const maxEdge = batchSizeHint >= 3 ? 512 : 640;
     const quality = batchSizeHint >= 3 ? 0.68 : 0.72;
 
     const refImgs = [];
@@ -857,7 +1002,24 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       const threshold = Math.max(1, Number(cfg.DUAL_DIFF_THRESHOLD) || 2);
 
       slog(`评委A=${modelA}` + (modelB ? ` 评委B=${modelB}` : " （单模型）"));
-      const scoresA = await scoreAllWithModel(cleanTask, cfg, modelA);
+      const dual = !!(modelB && modelB !== modelA);
+      let scoresA;
+      let scoresB = null;
+      const tJudge = Date.now();
+      if (dual) {
+        // 双评委并行，墙钟时间约减半
+        slog("双评委并行开跑");
+        const [a, b] = await Promise.all([
+          scoreAllWithModel(cleanTask, cfg, modelA),
+          scoreAllWithModel(cleanTask, cfg, modelB),
+        ]);
+        scoresA = a;
+        scoresB = b;
+        slog(`双评委并行完成 用时 ${((Date.now() - tJudge) / 1000).toFixed(0)}s`);
+      } else {
+        scoresA = await scoreAllWithModel(cleanTask, cfg, modelA);
+        slog(`评委A 完成 用时 ${((Date.now() - tJudge) / 1000).toFixed(0)}s`);
+      }
 
       // 空分：用评委 A 重试一次（保持旧行为）
       for (let i = 0; i < scoresA.length; i++) {
@@ -892,23 +1054,26 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       }
 
       // 双模型
-      if (modelB && modelB !== modelA) {
-        slog(`评委B 开跑 ${modelB}`);
-        const scoresB = await scoreAllWithModel(cleanTask, cfg, modelB);
+      if (dual) {
         const { merged, needReview } = mergeDualScores(scoresA, scoresB, threshold);
         slog(`双模型合并：待审 ${needReview.length} 个 / 阈值 ${threshold}`);
         let final = merged;
+        // 双分差审核 + 规则审核共用同一时间预算，防止叠成 2×90s
+        const reviewDeadline =
+          Date.now() + Math.max(20000, Number(cfg.REVIEW_BUDGET_MS) || 90000);
         if (needReview.length && modelR) {
-          const reviewed = await reviewScores(cleanTask, needReview, cfg);
+          const reviewed = await reviewScores(cleanTask, needReview, cfg, reviewDeadline);
           const revMap = new Map(reviewed.map((s) => [s.model, s]));
           final = merged.map((m) => revMap.get(m.model) || m);
         }
-        const reviewed2 = await applyPolicyReview(cleanTask, final, cfg);
+        const reviewed2 = await applyPolicyReview(cleanTask, final, cfg, reviewDeadline);
         // 保序拉开，避免人人 9/8/9/8/7
         return rankSpreadScores(reviewed2);
       }
 
-      const reviewed3 = await applyPolicyReview(cleanTask, scoresA, cfg);
+      const reviewDeadline2 =
+        Date.now() + Math.max(20000, Number(cfg.REVIEW_BUDGET_MS) || 90000);
+      const reviewed3 = await applyPolicyReview(cleanTask, scoresA, cfg, reviewDeadline2);
       return rankSpreadScores(reviewed3);
     }
 

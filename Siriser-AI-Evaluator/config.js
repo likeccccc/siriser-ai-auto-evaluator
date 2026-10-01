@@ -11,9 +11,15 @@ window.SIRISER_CONFIG = {
   /** 双模型：填第二模型则开启「两套分取中」；分差≥DUAL_DIFF_THRESHOLD 再审 */
   OPENAI_MODEL_2: "",
   OPENAI_MODEL_REVIEW: "",
-  DUAL_DIFF_THRESHOLD: 2,
-  /** 每批评分的模型数：1 更稳（避免串图），2 更快 */
+  DUAL_DIFF_THRESHOLD: 3,
+  /** 单题最多送审核的模型个数（其余保留双模型均值）。审核模型常很慢，默认只审 1 个 */
+  MAX_REVIEW: 1,
+  /** 审核总时间预算 ms */
+  REVIEW_BUDGET_MS: 60000,
+  /** 每批评分的模型数：1 更稳（避免串图），3 更快 */
   BATCH_SIZE: 1,
+  /** 逐张评分时的并发路数（2–3）；合评时固定 1 */
+  PARALLEL: 2,
   /**
    * 模型基础先验（史均不足时的默认期望）
    * 观察：A–D 往往更好，往后逐级略降
