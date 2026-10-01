@@ -419,13 +419,29 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       userPartsOverride || buildOpenAIUserContent(SHORT_SYSTEM, task, models)
     );
     const modelName = cfg.OPENAI_MODEL || "gpt-4o-mini";
-    const outputLimit = Math.max(
+    const baseOutputLimit = Math.max(
       128,
       Math.min(4096, Number(cfg.MAX_OUTPUT_TOKENS) || 768)
     );
     const isQwen3Family = /^qwen3(?:[.-]|$)/i.test(modelName);
+    const isQwen38Family = /^qwen3\.8(?:-|$)/i.test(modelName);
     const supportsMaxCompletionTokens =
       /^qwen3\.[5-9]-(?:max|plus|flash)(?:-|$)/i.test(modelName);
+    const scoringMode = ["fast", "balanced", "thinking"].includes(cfg.SCORING_MODE)
+      ? cfg.SCORING_MODE
+      : "fast";
+    const requestRole = cfg.REQUEST_ROLE === "review" ? "review" : "judge";
+    const thinkingEnabled =
+      isQwen3Family &&
+      (scoringMode === "thinking" ||
+        (scoringMode === "balanced" && requestRole === "review"));
+    const thinkingBudget = requestRole === "review" ? 512 : 384;
+    // Qwen3.8 的最低推理档 low 约等于 4096 token，需要给最终 JSON 留余量。
+    const outputLimit = thinkingEnabled
+      ? isQwen38Family
+        ? Math.max(baseOutputLimit, 4608)
+        : Math.max(baseOutputLimit, thinkingBudget + 384)
+      : baseOutputLimit;
     const t0 = Date.now();
 
     // 纯 thinking 型号无法可靠关闭思考，禁止用于高频评分，防止一次任务烧掉数万 token。
@@ -445,11 +461,22 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         { role: "user", content },
       ],
     };
-    // Qwen 3.7/3.8 等混合思考模型默认会产生大量隐藏推理 token。
     // 原生 HTTP 请求必须把 enable_thinking 放在 body 顶层。
     if (isQwen3Family) {
-      body.enable_thinking = false;
-      slog(`成本保护：${modelName} 已关闭思考`);
+      body.enable_thinking = thinkingEnabled;
+      if (thinkingEnabled) {
+        if (isQwen38Family) {
+          body.reasoning_effort = "low";
+          slog(`有限思考：${modelName} ${requestRole} effort=low mode=${scoringMode}`);
+        } else {
+          body.thinking_budget = thinkingBudget;
+          slog(
+            `有限思考：${modelName} ${requestRole} budget=${thinkingBudget} mode=${scoringMode}`
+          );
+        }
+      } else {
+        slog(`成本保护：${modelName} ${requestRole} 已关闭思考 mode=${scoringMode}`);
+      }
     }
     // max_completion_tokens 能同时限制思考链和可见回答；其他模型退回 max_tokens。
     if (supportsMaxCompletionTokens) {
@@ -466,7 +493,8 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       "Content-Type": "application/json",
       Authorization: `Bearer ${cfg.OPENAI_API_KEY}`,
     };
-    const timeout = Math.max(60000, Number(cfg.TIMEOUT_MS) || 300000);
+    const minTimeout = requestRole === "review" ? 10000 : 60000;
+    const timeout = Math.max(minTimeout, Number(cfg.TIMEOUT_MS) || 300000);
 
     slog(
       `请求 ${models.map((m) => m.id).join(",")} model=${modelName} 超时=${(timeout / 1000).toFixed(0)}s`
@@ -556,7 +584,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         (reasoningTokens ? ` 思考=${reasoningTokens}` : "") +
         (finishReason ? ` finish=${finishReason}` : "")
     );
-    if (isQwen3Family && reasoningTokens > 0) {
+    if (isQwen3Family && !thinkingEnabled && reasoningTokens > 0) {
       const err = new Error(
         `成本保护触发：${modelName} 仍产生 ${reasoningTokens} 个思考 token，已停止后续评分。`
       );
@@ -588,7 +616,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     const byId = new Map();
     const batchSize = Math.max(1, Number(cfg.BATCH_SIZE) || 1);
     const total = Math.ceil(cleanTask.models.length / batchSize);
-    const subCfg = { ...cfg, OPENAI_MODEL: modelName };
+    const subCfg = { ...cfg, OPENAI_MODEL: modelName, REQUEST_ROLE: "judge" };
     // 逐张/合评都可并发，避免 6 次串行 ×40s+
     const parallel = Math.max(1, Math.min(3, Number(cfg.PARALLEL) || 2));
 
@@ -947,7 +975,13 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         userParts.push(imgPart(src));
       });
 
-      const subCfg = { ...cfg, OPENAI_MODEL: revModel };
+      const remainingMs = Math.max(10000, deadline - Date.now());
+      const subCfg = {
+        ...cfg,
+        OPENAI_MODEL: revModel,
+        REQUEST_ROLE: "review",
+        TIMEOUT_MS: Math.min(Number(cfg.TIMEOUT_MS) || 300000, remainingMs),
+      };
       slog(`审核 ${item.model} → ${revModel}`);
       try {
         const scores = await callOpenAIBatch(
@@ -1065,7 +1099,16 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       const modelR = String(cfg.OPENAI_MODEL_REVIEW || "").trim();
       const threshold = Math.max(1, Number(cfg.DUAL_DIFF_THRESHOLD) || 2);
 
-      slog(`评委A=${modelA}` + (modelB ? ` 评委B=${modelB}` : " （单模型）"));
+      const modeName =
+        cfg.SCORING_MODE === "thinking"
+          ? "思考"
+          : cfg.SCORING_MODE === "balanced"
+            ? "平衡"
+            : "快速";
+      slog(
+        `评分模式=${modeName} 评委A=${modelA}` +
+          (modelB ? ` 评委B=${modelB}` : " （单模型）")
+      );
       const dual = !!(modelB && modelB !== modelA);
       let scoresA;
       let scoresB = null;
@@ -1099,7 +1142,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
           const retry = await callOpenAIBatch(
             { prompt: cleanTask.prompt, referenceImages: [], models: one },
             one,
-            { ...cfg, OPENAI_MODEL: modelA, TIMEOUT_MS: 60000 }
+            { ...cfg, OPENAI_MODEL: modelA, TIMEOUT_MS: 60000, REQUEST_ROLE: "judge" }
           );
           const hit =
             retry.find((r) => normModelId(r.model) === s.model) ||

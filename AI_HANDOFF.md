@@ -74,7 +74,7 @@ AI_HANDOFF.md        # 本文件
 | OPENAI_MODEL_2 | 评委 B，可空；勿用 `qwen3.7-max*` |
 | OPENAI_MODEL_REVIEW | 审核，可空 |
 | DUAL_DIFF_THRESHOLD | 默认 **3** |
-| MAX_REVIEW / REVIEW_BUDGET_MS | 默认 3 / 90000 |
+| MAX_REVIEW / REVIEW_BUDGET_MS | 按模式：快速 1/45s；平衡 3/90s；思考 2/120s |
 | DINGTALK_WEBHOOK | 异常推送 |
 | BATCH_SIZE | 1 逐张 / 3 合评（按钮触发） |
 
@@ -129,6 +129,15 @@ AI_HANDOFF.md        # 本文件
 | ~~低~~ | ~~配置导出/导入~~ → popup「导出/导入配置」JSON |
 | 低 | 钉钉双向问答（需 Stream/服务端，扩展做不到） |
 | ~~低~~ | ~~CSV 导出评分明细~~ → 模型统计面板「导出CSV」 |
+
+### 1.0.16 行为补充
+
+- popup 新增三档评分模式：快速 / 平衡（推荐）/ 思考
+- 快速：评委与审核均关闭思考，最多审核 1 个，共 45s
+- 平衡：评委关闭思考，仅审核启用有限思考，最多审核 3 个，共 90s
+- 思考：评委与审核均启用有限思考，最多审核 2 个，共 120s
+- Qwen3.7 等使用 `thinking_budget`（评委 384 / 审核 512）；Qwen3.8 使用最低 `reasoning_effort=low` 并保留总输出硬上限
+- 模型测试按钮固定关闭思考，只验证收图、权限与 JSON 连通性，避免测试本身产生高费用
 
 ### 1.0.15 行为补充
 

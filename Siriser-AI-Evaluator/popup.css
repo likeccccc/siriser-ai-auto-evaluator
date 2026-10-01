@@ -105,7 +105,8 @@ label {
 
 input[type="url"],
 input[type="password"],
-input[type="text"] {
+input[type="text"],
+select {
   display: block;
   width: 100%;
   margin-top: 4px;
@@ -117,6 +118,14 @@ input[type="text"] {
   font: 12px var(--mono);
 }
 input:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+select:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+
+.field-hint {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font: 10px/1.45 var(--ui);
+}
 
 .check {
   display: flex;

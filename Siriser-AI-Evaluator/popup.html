@@ -63,6 +63,14 @@
     <label>审核模型（分差大时裁决，可选）
       <input type="text" id="oaModelReview" placeholder="qwen-vl-max / 留空=用均值" />
     </label>
+    <label>评分模式
+      <select id="scoringMode">
+        <option value="fast">快速模式 · 最快最省</option>
+        <option value="balanced">平衡模式 · 推荐</option>
+        <option value="thinking">思考模式 · 最慢最贵</option>
+      </select>
+      <small class="field-hint" id="scoringModeHint"></small>
+    </label>
     <label>分差阈值（≥N 分才审核，建议 3）
       <input type="number" id="dualThreshold" min="1" max="5" value="3" />
     </label>

@@ -30,14 +30,42 @@ const DEFAULTS = {
   OPENAI_API_KEY: "",
   OPENAI_MODEL_2: "",
   OPENAI_MODEL_REVIEW: "",
+  SCORING_MODE: "fast",
   DUAL_DIFF_THRESHOLD: 3,
   MAX_REVIEW: 1,
-  REVIEW_BUDGET_MS: 60000,
+  REVIEW_BUDGET_MS: 45000,
   MAX_OUTPUT_TOKENS: 768,
   DINGTALK_WEBHOOK: "",
   AUTO_SUBMIT: false,
   AUTO_NEXT: true,
 };
+
+const SCORING_PROFILES = {
+  fast: {
+    maxReview: 1,
+    reviewBudgetMs: 45000,
+    hint: "评委与审核均关闭思考；速度最快、Token 最省。",
+  },
+  balanced: {
+    maxReview: 3,
+    reviewBudgetMs: 90000,
+    hint: "评委 A/B 快速评分，只让高风险审核有限思考；需填写审核模型，推荐 qwen3.7-plus。",
+  },
+  thinking: {
+    maxReview: 2,
+    reviewBudgetMs: 120000,
+    hint: "评委与审核均有限思考；准确性优先，时间和 Token 消耗最高。",
+  },
+};
+
+function scoringProfile(mode) {
+  return SCORING_PROFILES[mode] || SCORING_PROFILES.fast;
+}
+
+function updateScoringModeHint() {
+  const mode = $("scoringMode").value || "fast";
+  $("scoringModeHint").textContent = scoringProfile(mode).hint;
+}
 
 function setStatus(text, kind) {
   $("statusText").textContent = text;
@@ -86,6 +114,8 @@ async function loadConfig() {
 async function saveConfig() {
   // 合并已有配置，避免覆盖掉 MAX_REVIEW / TIMEOUT_MS 等未暴露字段
   const prev = await loadConfig();
+  const scoringMode = $("scoringMode").value || "fast";
+  const profile = scoringProfile(scoringMode);
   const cfg = {
     ...prev,
     API_URL: "",
@@ -94,6 +124,9 @@ async function saveConfig() {
     OPENAI_MODEL: $("oaModel").value.trim() || DEFAULTS.OPENAI_MODEL,
     OPENAI_MODEL_2: $("oaModel2").value.trim(),
     OPENAI_MODEL_REVIEW: $("oaModelReview").value.trim(),
+    SCORING_MODE: scoringMode,
+    MAX_REVIEW: profile.maxReview,
+    REVIEW_BUDGET_MS: profile.reviewBudgetMs,
     DUAL_DIFF_THRESHOLD: Number($("dualThreshold").value) || 3,
     DINGTALK_WEBHOOK: $("dingWebhook").value.trim(),
     OPENAI_API_KEY: $("oaKey").value.trim(),
@@ -124,10 +157,16 @@ async function initForm() {
   $("oaModel").value = cfg.OPENAI_MODEL || "";
   $("oaModel2").value = cfg.OPENAI_MODEL_2 || "";
   $("oaModelReview").value = cfg.OPENAI_MODEL_REVIEW || "";
+  $("scoringMode").value = SCORING_PROFILES[cfg.SCORING_MODE]
+    ? cfg.SCORING_MODE
+    : "fast";
+  updateScoringModeHint();
   $("dualThreshold").value = cfg.DUAL_DIFF_THRESHOLD != null ? cfg.DUAL_DIFF_THRESHOLD : 3;
   $("dingWebhook").value = cfg.DINGTALK_WEBHOOK || "";
   $("oaKey").value = cfg.OPENAI_API_KEY || "";
 }
+
+$("scoringMode").addEventListener("change", updateScoringModeHint);
 
 async function sendToPage(msg) {
   const tab = await getActiveTab();
@@ -308,6 +347,12 @@ async function testConfiguredModel(configKey, roleLabel) {
     const key = String(cfg.OPENAI_API_KEY || "").trim();
     const model = String(cfg[configKey] || "").trim();
     const base = String(cfg.OPENAI_BASE_URL || "").trim().replace(/\/+$/, "");
+    const modeLabel =
+      cfg.SCORING_MODE === "thinking"
+        ? "思考模式"
+        : cfg.SCORING_MODE === "balanced"
+          ? "平衡模式"
+          : "快速模式";
     if (!key) {
       setStatus("请先填写 API Key 并保存", "err");
       $("preview").textContent = "缺少 OPENAI_API_KEY";
@@ -433,6 +478,7 @@ async function testConfiguredModel(configKey, roleLabel) {
     $("preview").textContent = [
       `角色：${roleLabel}`,
       `模型：${model}`,
+      `评分模式：${modeLabel}（连通测试固定关闭思考）`,
       `Base：${base}`,
       `见图：${see ? "是" : "否"}`,
       `主色：${color}`,
