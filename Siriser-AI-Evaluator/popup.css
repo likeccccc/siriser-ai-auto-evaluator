@@ -28,6 +28,18 @@ body {
   margin-bottom: 10px;
 }
 
+.hd-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.version {
+  color: var(--muted);
+  font: 600 10px/1 var(--mono);
+  white-space: nowrap;
+}
+
 .mark {
   font: 700 10px/1 var(--mono);
   letter-spacing: 0.12em;

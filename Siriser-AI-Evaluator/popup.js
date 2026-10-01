@@ -602,6 +602,7 @@ $("btnSubmit").addEventListener("click", async () => {
   }
 });
 
+$("versionText").textContent = "v" + chrome.runtime.getManifest().version;
 initForm();
 
 $("btnOpenWorkbench").addEventListener("click", async () => {
