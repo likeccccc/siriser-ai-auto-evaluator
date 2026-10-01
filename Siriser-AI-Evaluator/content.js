@@ -1357,13 +1357,34 @@
     if (_humanModeCached == null) {
       _humanModeCached = await loadHumanMode();
     }
+    const pacedClicks = !!_humanModeCached;
+    const plannedClicks = scores.reduce((count, s) => {
+      if (s._skipClick) return count;
+      const bag = groups.get(s.model) || {};
+      return count + DIMS.filter((dim) => {
+        const cell = bag[dim];
+        return cell && pickTargetEl(cell.options, s[dim]);
+      }).length;
+    }, 0);
+    // 90 格完整题约 5–6 分钟；只评少量模型时按实际格数缩短。
+    const fullTask = scores.length >= 15;
+    const humanTargetMs = pacedClicks && plannedClicks
+      ? Math.round(
+          (5 * 60 * 1000 + Math.random() * 60 * 1000) *
+            (fullTask ? 1 : plannedClicks / 90)
+        )
+      : 0;
+    const weights = Array.from(
+      { length: plannedClicks },
+      () => 0.75 + Math.random() * 0.5
+    );
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+    let completedWeight = 0;
     log(
       "点击节奏：" +
-        (!_humanModeCached
+        (!pacedClicks
           ? "拟人关闭（60ms/格）"
-          : _rushClicks
-            ? "自动赶工（180–400ms/格）"
-            : "普通拟人（1.0–2.6s/格）")
+          : `拟人开启（计划 ${plannedClicks} 格 / ${fmtDur(humanTargetMs)}）`)
     );
 
     for (const s of scores) {
@@ -1400,19 +1421,11 @@
         // 点之前确认五维目标不是同一个元素
         fireClick(target);
         markSelected(target);
-        // 自动模式用时近半 → 赶工，缩短拟人间隔，避免点完就撞总时长
-        if (
-          _humanModeCached &&
-          !_rushClicks &&
-          _autoScoreT0 &&
-          _autoScoreTargetMs > 0 &&
-          Date.now() - _autoScoreT0 > _autoScoreTargetMs * 0.45
-        ) {
-          _rushClicks = true;
-          log("点击节奏切换：自动任务已用时近半，进入赶工（180–400ms/格）");
-        }
-        const gap = await humanClickDelay();
-        if (gap > 500) log(`拟人间隔 ${gap}ms`);
+        completedWeight += weights[clicked] || 0;
+        const dueAt = pacedClicks
+          ? clickT0 + Math.round(humanTargetMs * completedWeight / totalWeight)
+          : 0;
+        await humanClickDelay(dueAt, pacedClicks);
         log(`点击 ${s.model} ${dim}→${v}`);
         line.filled.push(dim + "=" + (v == null ? "无" : v));
         line._targets = line._targets || [];
@@ -1660,10 +1673,6 @@
 
   async function runAutoScore(onlyCurrent, opts) {
     const t0 = Date.now();
-    const isAutoTask = !!(opts && opts.autoMode);
-    if (!isAutoTask) {
-      resetAutoClickTiming("手动评分开始");
-    }
     await loadConfigFromStorage();
     setStatusDock("准备任务", "加载配置 / 识别页面");
     const batchSize = Math.max(1, Number((opts && opts.batchSize) || CFG.BATCH_SIZE || 1));
@@ -1978,7 +1987,6 @@
     _autoGen += 1;
     _autoRunning = false;
     _cancelSubmit = false;
-    resetAutoClickTiming("自动模式停止");
     saveAutoState({ on: false, phase: "off", submitAt: null, reason: reason || "stopped", at: Date.now() });
     log("全自动停止：" + (reason || ""));
     // 用户手动关不推送；异常停止才推钉钉（必须 await）
@@ -2094,9 +2102,6 @@
     // 本题目标：从开始评分到提交，总时长随机 6–8 分钟
     const t0 = Date.now();
     const targetMs = randTotalMs();
-    _autoScoreT0 = t0;
-    _autoScoreTargetMs = targetMs;
-    _rushClicks = false;
     log(`本题目标总时长 ${fmtDur(targetMs)}（含评分+勾选+等待）`);
 
     await waitImagesSafe(20000);
@@ -2141,9 +2146,6 @@
     }
 
     if (_autoGen !== myGen) return false;
-
-    // 评分与勾选已经结束；后续只等待提交，不允许赶工状态泄漏到手动评分。
-    resetAutoClickTiming("自动任务勾选结束");
 
     const elapsed = Date.now() - t0;
     const wait = targetMs - elapsed;
@@ -2265,17 +2267,6 @@
     return 6 * 60 * 1000 + Math.floor(Math.random() * 2 * 60 * 1000 + 1);
   }
   const TOTAL_HARD_CAP_MS = 15 * 60 * 1000;
-  let _rushClicks = false;
-  let _autoScoreT0 = 0;
-  let _autoScoreTargetMs = 0;
-
-  function resetAutoClickTiming(reason) {
-    const hadState = !!(_rushClicks || _autoScoreT0 || _autoScoreTargetMs);
-    _rushClicks = false;
-    _autoScoreT0 = 0;
-    _autoScoreTargetMs = 0;
-    if (hadState && reason) log(`点击节奏已重置：${reason}`);
-  }
 
   async function autoLoop() {
     if (_autoRunning) return;
@@ -2722,25 +2713,17 @@
     const sw = document.getElementById("siriser-human-switch");
     const lb = document.getElementById("siriser-human-label");
     if (sw) sw.classList.toggle("on", !!on);
-    if (lb) lb.textContent = on ? "已开启拟人点击（2–4s/格）" : "已关闭拟人点击";
+    if (lb) lb.textContent = on ? "已开启拟人点击（全题5–6分钟）" : "已关闭拟人点击";
   }
 
-  /** 拟人间隔：默认 1.0–2.6 秒；赶工时 0.2–0.4 秒。模式缓存，避免每点一次都读 storage */
+  /** 用随机权重分配总时长，并按累计时间校准，避免页面滚动导致越点越慢。 */
   let _humanModeCached = null;
-  async function humanClickDelay() {
-    if (_humanModeCached == null) {
-      _humanModeCached = await loadHumanMode();
-    }
-    if (!_humanModeCached) {
+  async function humanClickDelay(dueAt, pacedClicks) {
+    if (!pacedClicks) {
       await sleep(60);
       return 60;
     }
-    if (_rushClicks) {
-      const ms = 180 + Math.floor(Math.random() * 220);
-      await sleep(ms);
-      return ms;
-    }
-    const ms = 1000 + Math.floor(Math.random() * 1600);
+    const ms = Math.max(0, Math.round(dueAt - Date.now()));
     await sleep(ms);
     return ms;
   }
@@ -2757,7 +2740,7 @@
           <span class="sir-toggle-label" id="siriser-auto-label">已关闭自动模式</span>
           <span class="sir-switch" id="siriser-auto-switch"><i></i></span>
         </div>
-        <div class="sir-toggle-row" data-act="human-toggle" role="button" tabindex="0" title="每格间隔 2–4 秒随机点击">
+        <div class="sir-toggle-row" data-act="human-toggle" role="button" tabindex="0" title="完整一题约 90 格，勾选用时 5–6 分钟">
           <span class="sir-toggle-label" id="siriser-human-label">已关闭拟人点击</span>
           <span class="sir-switch" id="siriser-human-switch"><i></i></span>
         </div>
@@ -2948,7 +2931,7 @@
         const on = !(await loadHumanMode());
         saveHumanMode(on);
         setHumanSwitchUI(on);
-        toastMsg(on ? "已开启拟人点击：每格约 2–4 秒" : "已关闭拟人点击（瞬时点完）");
+        toastMsg(on ? "已开启拟人点击：完整一题勾选约 5–6 分钟" : "已关闭拟人点击（瞬时点完）");
         log("拟人点击=" + (on ? "开" : "关"));
         return;
       }
