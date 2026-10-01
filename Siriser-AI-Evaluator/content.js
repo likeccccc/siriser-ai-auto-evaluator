@@ -2945,7 +2945,6 @@
         return;
       }
       if (act === "human-toggle") {
-        menu.classList.remove("open");
         const on = !(await loadHumanMode());
         saveHumanMode(on);
         setHumanSwitchUI(on);
