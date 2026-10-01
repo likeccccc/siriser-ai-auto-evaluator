@@ -2954,7 +2954,6 @@
         return;
       }
       if (act === "auto-toggle") {
-        menu.classList.remove("open");
         try {
           const st = await loadAutoState();
           const on = !(st && st.on);
