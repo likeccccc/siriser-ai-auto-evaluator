@@ -327,10 +327,11 @@
   }
 
   /** 换题后图片可能未加载完（0×0）；等到有尺寸再采集 */
-  async function waitForImagesReady(timeoutMs) {
+  async function waitForImagesReady(timeoutMs, opts) {
     try {
       const t0 = Date.now();
       const limit = timeoutMs || 15000;
+      const notifyOnTimeout = !(opts && opts.notifyOnTimeout === false);
       for (;;) {
         const labels = findModelLabels();
         // 标签左右各一份会重复，必须按去重模型数判断，否则永远等不齐
@@ -350,10 +351,12 @@
         }
         if (Date.now() - t0 > limit) {
           log(`等图超时 models=${need} imgs=${bigImgs}`, "err");
-          notifyAbnormal(
-            "等图超时",
-            `模型 ${need} / 正常图 ${bigImgs} / 破图 ${brokenImgs}，${fmtDur(limit)} 内未就绪，将继续评分（可能缺图）`
-          ).catch(() => {});
+          if (notifyOnTimeout) {
+            notifyAbnormal(
+              "等图超时",
+              `模型 ${need} / 正常图 ${bigImgs} / 破图 ${brokenImgs}，${fmtDur(limit)} 内未就绪，将继续评分（可能缺图）`
+            ).catch(() => {});
+          }
           return false;
         }
         await sleep(400);
@@ -1671,12 +1674,95 @@
     return task;
   }
 
+  const IMAGE_RECHECK_WAIT_MS = 12000;
+  let _lastImageAlertKey = "";
+
+  function taskImageIssues(task) {
+    return ((task && task._cards) || []).filter(
+      (m) => m && (m.broken || !(m.images && m.images.length))
+    );
+  }
+
+  function wakeImageLoading(issues) {
+    (issues || []).forEach((m) => {
+      const img = m && m.imgEl;
+      const target = img || (m && m.labelEl);
+      if (img) {
+        try {
+          img.loading = "eager";
+          img.fetchPriority = "high";
+          if (m.broken) {
+            const retrySrc =
+              img.getAttribute("data-src") ||
+              img.getAttribute("data-original") ||
+              img.getAttribute("src") ||
+              img.currentSrc ||
+              img.src ||
+              "";
+            if (retrySrc) {
+              img.src = retrySrc;
+              log(`重试加载图片 ${m.id}`);
+            }
+          }
+        } catch (_) {}
+      }
+      try {
+        target && target.scrollIntoView({ block: "center", behavior: "auto" });
+      } catch (_) {}
+    });
+    try {
+      window.dispatchEvent(new Event("scroll"));
+    } catch (_) {}
+  }
+
+  /** 首次缺图/破图先等待网络并重采一次；复查仍失败才进入置无和通知。 */
+  async function collectTaskWithImageRecheck() {
+    let task = collectTask();
+    let issues = taskImageIssues(task);
+    if (!issues.length) return task;
+
+    const firstIds = issues.map((m) => m.id).join(",");
+    log(`图片初检异常 ${firstIds} → 等待 ${fmtDur(IMAGE_RECHECK_WAIT_MS)} 后复查`, "err");
+    setStatusDock("复查图片", `${firstIds} · 等待网络加载`);
+    wakeImageLoading(issues);
+    await sleep(IMAGE_RECHECK_WAIT_MS);
+
+    task = collectTask();
+    issues = taskImageIssues(task);
+    if (!issues.length) {
+      log(`图片复查恢复 ${firstIds}，继续评分`, "ok");
+      toastMsg(`图片已恢复：${firstIds}`);
+      return task;
+    }
+
+    const brokenIds = issues.filter((m) => m.broken).map((m) => m.id);
+    const missingIds = issues.filter((m) => !m.broken).map((m) => m.id);
+    const detail = [
+      brokenIds.length ? `破图：${brokenIds.join(",")}` : "",
+      missingIds.length ? `无图：${missingIds.join(",")}` : "",
+    ]
+      .filter(Boolean)
+      .join("；");
+    log(`图片复查仍异常 ${detail} → 五维将勾「无」`, "err");
+    setStatusDock("图片异常", `${detail} · 将勾无`, "err");
+
+    const alertKey = `${location.href}|${String(task.prompt || "").slice(0, 80)}`;
+    if (_lastImageAlertKey !== alertKey) {
+      _lastImageAlertKey = alertKey;
+      await notifyAbnormal(
+        "图片缺失/加载异常",
+        `等待 ${fmtDur(IMAGE_RECHECK_WAIT_MS)} 并重新检测后仍异常：${detail}。对应模型五维将勾“无”。`
+      );
+    }
+    return task;
+  }
+
   async function runAutoScore(onlyCurrent, opts) {
     const t0 = Date.now();
     await loadConfigFromStorage();
     setStatusDock("准备任务", "加载配置 / 识别页面");
     const batchSize = Math.max(1, Number((opts && opts.batchSize) || CFG.BATCH_SIZE || 1));
-    const task = collectTask();
+    const task = await collectTaskWithImageRecheck();
     log(
       `采集 models=${task.models.length} 有图=${task._meta.withImg} ref=${task._meta.hasRef} 批大小=${batchSize} prompt=${task.prompt.slice(0, 24)}…`
     );
@@ -2016,7 +2102,7 @@
     _cancelSubmit = false;
   }
 
-  async function waitImagesSafe(ms) {
+  async function waitImagesSafe(ms, opts) {
     const fn =
       typeof waitForImagesReady === "function"
         ? waitForImagesReady
@@ -2026,7 +2112,7 @@
       return true;
     }
     try {
-      return await fn(ms);
+      return await fn(ms, opts);
     } catch (e) {
       log("等图失败(忽略)：" + (e && e.message));
       return true;
@@ -2104,7 +2190,7 @@
     const targetMs = randTotalMs();
     log(`本题目标总时长 ${fmtDur(targetMs)}（含评分+勾选+等待）`);
 
-    await waitImagesSafe(20000);
+    await waitImagesSafe(20000, { notifyOnTimeout: false });
     await sleep(800);
 
     let scores = null;
@@ -2114,7 +2200,7 @@
       for (;;) {
         if (_autoGen !== myGen) return false;
         if (retries > 0) {
-          await waitImagesSafe(10000);
+          await waitImagesSafe(10000, { notifyOnTimeout: false });
           await sleep(600);
         }
         scores = await runAutoScore(false, {
