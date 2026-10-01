@@ -300,13 +300,13 @@ function parseTestJson(text) {
   return null;
 }
 
-/** 测试当前表单里的评委 A：发一张测试图，看能否收图并返回打分 JSON */
-$("btnTestModel").addEventListener("click", async () => {
+/** 测试指定模型：发一张测试图，看能否收图并返回打分 JSON */
+async function testConfiguredModel(configKey, roleLabel) {
   try {
     await saveConfig();
     const cfg = await loadConfig();
     const key = String(cfg.OPENAI_API_KEY || "").trim();
-    const model = String(cfg.OPENAI_MODEL || "").trim();
+    const model = String(cfg[configKey] || "").trim();
     const base = String(cfg.OPENAI_BASE_URL || "").trim().replace(/\/+$/, "");
     if (!key) {
       setStatus("请先填写 API Key 并保存", "err");
@@ -314,8 +314,8 @@ $("btnTestModel").addEventListener("click", async () => {
       return;
     }
     if (!model) {
-      setStatus("请先填写 Model（评委 A）", "err");
-      $("preview").textContent = "缺少 OPENAI_MODEL";
+      setStatus(`请先填写${roleLabel}`, "err");
+      $("preview").textContent = `${roleLabel}未配置（${configKey} 为空）`;
       return;
     }
     if (/^qwen.*thinking(?:-|$)/i.test(model)) {
@@ -325,7 +325,7 @@ $("btnTestModel").addEventListener("click", async () => {
         "请改用 instruct 或可关闭思考的 Qwen 3.7/3.8 模型。";
       return;
     }
-    setStatus(`测试模型 ${model} 收图打分…`, "busy");
+    setStatus(`测试${roleLabel} ${model} 收图打分…`, "busy");
     setProg(25);
 
     const img = makeTestImage();
@@ -390,7 +390,7 @@ $("btnTestModel").addEventListener("click", async () => {
       }
       setStatus(`测试失败 HTTP ${res.status}`, "err");
       $("preview").textContent =
-        `模型：${model}\nBase：${base}\nHTTP ${res.status}\n${short}\n${hint}`;
+        `角色：${roleLabel}\n模型：${model}\nBase：${base}\nHTTP ${res.status}\n${short}\n${hint}`;
       return;
     }
 
@@ -431,6 +431,7 @@ $("btnTestModel").addEventListener("click", async () => {
       setProg(100);
     }
     $("preview").textContent = [
+      `角色：${roleLabel}`,
       `模型：${model}`,
       `Base：${base}`,
       `见图：${see ? "是" : "否"}`,
@@ -457,6 +458,14 @@ $("btnTestModel").addEventListener("click", async () => {
       $("preview").textContent = msg;
     }
   }
+}
+
+[
+  ["btnTestModelA", "OPENAI_MODEL", "评委 A"],
+  ["btnTestModelB", "OPENAI_MODEL_2", "评委 B"],
+  ["btnTestModelReview", "OPENAI_MODEL_REVIEW", "审核模型"],
+].forEach(([buttonId, configKey, roleLabel]) => {
+  $(buttonId).addEventListener("click", () => testConfiguredModel(configKey, roleLabel));
 });
 
 $("btnTestDing").addEventListener("click", async () => {
