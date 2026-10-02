@@ -1660,6 +1660,7 @@
         id: m.id,
         name: m.name,
         images: m.images,
+        meta: { w: Number(m.meta && m.meta.w) || 0, h: Number(m.meta && m.meta.h) || 0 },
       })),
       _cards: visual.models,
       _meta: {
@@ -1757,6 +1758,51 @@
     return task;
   }
 
+  function promptRequiresSquareOutput(prompt) {
+    const s = String(prompt || "").replace(/\s+/g, " ");
+    const ratio = "(?:1|１|一)\\s*(?:[:：]|比)\\s*(?:1|１|一)";
+    return (
+      new RegExp(
+        `(?:输出|生成|导出|画布|画幅|尺寸|比例|图片|图像|output|aspect)[^。；\\n]{0,32}${ratio}`,
+        "i"
+      ).test(s) ||
+      new RegExp(
+        `${ratio}[^。；\\n]{0,20}(?:输出|图片|图像|画布|画幅|比例|output|image)`,
+        "i"
+      ).test(s) ||
+      /(?:输出|生成|导出|output)[^。；\n]{0,20}(?:正方形|方形|square)(?:图片|图像|image)?/i.test(s)
+    );
+  }
+
+  /** 明确要求 1:1 时按图片真实像素做硬校验，避免视觉模型忽略画布比例。 */
+  function applySquareOutputPolicy(scores, task, models) {
+    if (!promptRequiresSquareOutput(task && task.prompt)) return scores;
+    const byId = new Map((models || []).map((m) => [String(m.id || "").toUpperCase(), m]));
+    return (scores || []).map((s) => {
+      if (!s || s._forceNa || s._skipClick || typeof s.alignment !== "number") return s;
+      const id = String(s.model || "")
+        .replace(/^(?:模型|model)\s*[-–—_：: ]*/i, "")
+        .toUpperCase();
+      const card = byId.get(id);
+      const w = Number(card && card.meta && card.meta.w) || 0;
+      const h = Number(card && card.meta && card.meta.h) || 0;
+      if (!w || !h) return s;
+      const longShort = Math.max(w, h) / Math.min(w, h);
+      if (longShort <= 1.03) return s;
+
+      const severe = longShort >= 1.12;
+      const cap = severe ? 5 : 7;
+      s.alignment = Math.min(s.alignment, cap);
+      const tag = `[输出${w}×${h}，未达1:1]`;
+      if (!String(s.notes || "").includes("未达1:1")) {
+        s.notes = `${s.notes ? s.notes + " " : ""}${tag}`;
+      }
+      s._aspectMismatch = { expected: "1:1", width: w, height: h, cap };
+      log(`比例校验 ${id}: ${w}x${h} ≠ 1:1 → alignment≤${cap}`, "err");
+      return s;
+    });
+  }
+
   async function runAutoScore(onlyCurrent, opts) {
     const t0 = Date.now();
     await loadConfigFromStorage();
@@ -1776,6 +1822,7 @@
       id: m.id,
       name: m.name,
       images: m.images,
+      meta: { w: Number(m.meta && m.meta.w) || 0, h: Number(m.meta && m.meta.h) || 0 },
     }));
 
     log(
@@ -1862,6 +1909,8 @@
       }
       return { ...s, model: src ? src.id : s.model };
     });
+
+    scores = applySquareOutputPolicy(scores, task, modelsToEval);
 
     await applyScores(scores, {
       elapsedMs: Date.now() - t0,

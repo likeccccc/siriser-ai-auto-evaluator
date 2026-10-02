@@ -56,6 +56,7 @@ window.SCORING_SYSTEM_PROMPT = `你是 Edit Bench 图片编辑质量评测专家
 - 同一维度上，好图与差图至少相差 2 分（除非两图确实同档）。
 
 ### 5. 画布比例与内容形态（严禁把“1:1”误判为成功）
+- 指令明确要求输出 1:1 时，先核对生成图真实像素宽高。宽高允许约 3% 编码误差；超出即为格式要求未完成，轻度偏差 alignment≤7，明显横竖画幅 alignment≤5，不能因内容好看而忽略。
 - 指令要求输出 1:1，只代表最终画布比例；应通过合理裁切、扩图或重构完成，不能把原图整体非等比拉宽、压扁后硬塞进正方形。
 - 必须对照参考图检查脸宽、头身比、四肢长度、服装轮廓、圆形物体、背景人物及透视关系。输出是正方形，但上述结构整体横向变宽或纵向变短，属于明显形态失真。
 - 明显整体挤压时五维都受影响：alignment≤6、quality≤5、preservation≤5、consistency≤5、realism≤4；notes 必须明确写“非等比缩放/横向拉宽/纵向压扁”，不能只写“比例符合 1:1”。
@@ -70,6 +71,7 @@ window.SCORING_SYSTEM_PROMPT = `你是 Edit Bench 图片编辑质量评测专家
 6. 配件组合是否「只做一半」只轻扣、不连坐其他维？
 7. 好图与差图是否被拉开了？若 A 明显优于 B，alignment 或 quality 至少差 2。
 8. 1:1 是否通过非等比拉伸得到？若人物/物体被压扁，是否按形态失真上限处理？
+9. 指令要求 1:1 时，生成图真实宽高是否相等？若画布本身不是 1:1，是否下调 alignment？
 
 ## 打分顺序
 1. 读指令：拆成必要要求 R1…Rn（含「要改什么」和「要保持什么」）。
@@ -148,6 +150,7 @@ window.buildEvalRequest = function buildEvalRequest(task) {
       id: m.id,
       name: m.name || m.id,
       images: m.images || [],
+      meta: m.meta || { w: 0, h: 0 },
     })),
     response_schema: {
       type: "object",

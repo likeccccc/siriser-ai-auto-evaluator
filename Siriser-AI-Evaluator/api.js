@@ -364,6 +364,7 @@
         `每个模型 5 维 1–10 整数：alignment/quality/preservation/consistency/realism；无图输出 null 且 notes="no_image"。\n` +
         `模型列表：${models.map((m) => m.id).join(", ")}\n\n` +
         `【强制】不同模型必须给出不同分数向量，禁止复制粘贴同一套分。\n` +
+        `【输出比例】指令要求 1:1 时，生成图真实画布宽高必须近似相等；非 1:1 即为明确指令未完成，不能因内容好看而忽略。\n` +
         `【形态检查】若指令要求 1:1，必须辨别是正常裁切/扩图，还是把原内容非等比拉伸、压扁后硬塞进正方形；后者五维都要扣分。\n` +
         `每个模型的 notes 必须写出该图特有的一条问题（位置+现象），与其他模型不得相同。\n` +
         `若两图都挺好，也要通过「哪张更好」拉开至少 1 分差距。` +
@@ -377,12 +378,15 @@
     });
 
     models.forEach((m) => {
+      const size = m.meta && Number(m.meta.w) > 0 && Number(m.meta.h) > 0
+        ? `，真实尺寸=${Number(m.meta.w)}×${Number(m.meta.h)}`
+        : "";
       if (!(m.images || []).length) {
         parts.push({ type: "text", text: `model=${m.id} 无图` });
         return;
       }
       (m.images || []).forEach((src, i) => {
-        parts.push({ type: "text", text: `【model=${m.id}】image[${i}]：` });
+        parts.push({ type: "text", text: `【model=${m.id}${size}】image[${i}]：` });
         const im = imgPart(src);
         if (im) parts.push(im);
       });
@@ -403,6 +407,7 @@ alignment 指令遵循, quality 局部质量, preservation 非编辑保持, cons
 写实人像/街拍以真实摄影为准；插画/动漫不按照片扣，但仍扣「风格内假光影/糊脸」。
 
 【专家口径】
+- 若指令明确要求输出 1:1，而生成图真实宽高不相等（允许约 3% 编码误差），属于明确格式要求未完成：轻度偏差 alignment≤7，明显横竖画幅 alignment≤5。画面好看不能抵消比例错误。
 - 输出画布比例正确不代表内容形态正确。要求 1:1 时，应通过裁切、扩图或重构完成，禁止把整张图/人物/物体非等比拉宽或压扁。
 - 对照参考图检查脸宽、头身比、四肢、服装轮廓、圆形物体与背景透视。明显整体挤压时，notes 必须写“非等比缩放/横向拉宽/纵向压扁”；alignment≤6、quality≤5、preservation≤5、consistency≤5、realism≤4。
 - 左右：写「人物左手/右手」按画中人物自身；只写画面左右按观众视角。Prompt 不清做反只轻扣1分，不算严重不遵循。
@@ -1093,6 +1098,10 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         id: normModelId(m.id),
         name: m.name,
         images: send,
+        meta: m.meta && {
+          w: Number(m.meta.w) || 0,
+          h: Number(m.meta.h) || 0,
+        },
       });
     }
     const cleanTask = { prompt: task.prompt, referenceImages: refImgs, models };
