@@ -245,6 +245,12 @@
   background-color: #ffffff !important;
   background-image: none !important;
 }
+#siriser-result > .sir-r-h { cursor: grab; touch-action: none; user-select: none; flex-wrap: wrap; }
+#siriser-result > .sir-r-h.dragging { cursor: grabbing; }
+#siriser-result.collapsed { width: min(280px, calc(100vw - 24px)); }
+#siriser-result.collapsed .sir-r-b,
+#siriser-result.collapsed [data-r="submit"] { display: none; }
+/* Keep countdown and cancellation visible even when score details are collapsed. */
 #siriser-result .sir-r-sum {
   font-size: 11px;
   color: var(--muted) !important;

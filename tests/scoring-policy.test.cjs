@@ -126,3 +126,25 @@ test('wrong model review cannot validate another model full score', async () => 
   assert.equal(r[0]._reviewed,false);
   assert.equal(c.SiriserScoringPolicy.apply(r)[0].alignment,9);
 });
+test('body distortion affects quality and realism even under body proportion label', () => {
+  const p=load().SiriserScoringPolicy;
+  const r=p.apply([score([flag('body_proportion_changed')])])[0];
+  assert.equal(r.quality,5); assert.equal(r.realism,4); assert.equal(r.preservation,5);
+  const minor=p.apply([score([flag('body_proportion_changed','minor')])])[0];
+  assert.equal(minor.realism,8);
+});
+test('outpainting truncation caps edited quality and realism without preservation penalty', () => {
+  const p=load().SiriserScoringPolicy;
+  const r=p.apply([score([flag('outpaint_subject_truncated')])])[0];
+  assert.equal(r.quality,5); assert.equal(r.realism,5); assert.equal(r.preservation,10);
+  assert.equal(p.apply([score([flag('outpaint_subject_truncated','minor')])])[0].quality,8);
+  const merged=p.merge([flag('outpaint_subject_truncated')],[flag('outpaint_subject_truncated')]);
+  assert.equal(p.apply([{...score(),...merged}])[0].realism,5);
+});
+test('normal cropping is not inferred as defect from notes; prompt distinguishes it', () => {
+  const p=load().SiriserScoringPolicy;
+  const r=p.apply([{...score(),notes:'背景人物由最终画面边缘正常裁切'}])[0];
+  assert.equal(r.realism,10);
+  assert.match(p.prompt,/正常被最终画面边缘裁切/);
+  assert.match(p.prompt,/不能只扣preservation/);
+});

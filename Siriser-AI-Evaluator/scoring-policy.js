@@ -11,7 +11,7 @@
     identity_changed: ["身份改变", { preservation: 4 }],
     face_or_hair_changed: ["脸部或发型改变", { preservation: 6 }],
     pose_or_hand_changed: ["姿势或手势改变", { preservation: 5 }],
-    body_proportion_changed: ["身体比例改变", { preservation: 5, realism: 5 }],
+    body_proportion_changed: ["身体比例改变", { quality: 5, preservation: 5, realism: 4 }],
     protected_item_changed: ["保留物体或配饰改变", { preservation: 5 }],
     background_changed: ["非编辑背景改变", { preservation: 5 }],
     background_replacement_incomplete: ["背景替换不完整", { alignment: 5, quality: 6 }],
@@ -21,6 +21,7 @@
     edge_or_contact_artifact: ["边缘或接触伪影", { quality: 5, realism: 5 }],
     texture_or_anatomy_artifact: ["纹理或人体结构伪影", { quality: 5, realism: 5 }],
     non_uniform_distortion: ["非等比挤压", { alignment: 6, quality: 5, preservation: 5, consistency: 5, realism: 4 }],
+    outpaint_subject_truncated: ["扩图人物或物体断截", { quality: 5, realism: 5 }],
   };
   function normalize(flags) {
     const seen = new Set();
@@ -105,6 +106,8 @@
   const prompt = `逐项核对提示词：要改什么、必须保留什么、禁止什么、目标尺寸。只按可见证据评分，允许同分，不为拉开差距捏造缺陷。
 服装编辑检查颜色、材质、领袖扣袋、长短廓形、鞋包配饰、旧元素残留；背景编辑检查替换完整性、透视、主体保持、光向、反射和接触阴影。商品编辑检查产品形状、标识、材质保持；风格转换按目标风格评估，不因插画不是照片而扣分。检查多指、融合、塑料皮肤、纹理涂抹等可见伪影，不凭主观AI感扣分。只检查本题适用要求。
 指令允许的光照/反射调整不算保持失败；画布比例变化不等于内容挤压；合理裁切/扩图不自动扣分，但不得违反明确的全身和构图保持。指令冲突或不可见细节标注不确定，不猜测。CSS显示变形不等于原图变形，实际像素未知时不猜尺寸；精确分辨率不能从压缩预览推断。
+【形态与扩图必查】不论目标是1:1还是其他比例，对比参考图的人物头身比、躯干宽高与四肢长度：整体拉宽压矮、矮胖化是non_uniform_distortion，明显时realism≤4、quality≤5，不能只扣preservation。若仅人体比例改变也须检查quality与realism；不得把原本体型、姿势透视差异或提示词明确要求的合理变形当缺陷。
+扩图检查原画面边界内外：背景人物/物体原先被边框裁掉，扩图后该旧边框已位于新画面内部，仍残留半个人、躯干/肢体突兀断截且无合理遮挡，标outpaint_subject_truncated，明显时quality≤5、realism≤5。新生成区域及接缝属于编辑局部，不能仅扣非编辑保持。正常被最终画面边缘裁切、合理遮挡、原图已有且扩图未加重的问题不扣；无法确认断截位置不猜测。
 flags只列有证据的缺陷，最多4条最重要项，无缺陷为[]；每条{code,severity:"minor"或"major",evidence:"位置+要求与实际差异，≤30字"}。minor为轻微偏差，major为明显/核心失败；同一根因不重复列旗标。未见、疑似、不确定的缺陷不要放flags。
 可用code：${Object.entries(rules).map(([k,v]) => `${k}=${v[0]}`).join("；")}。
 颜色/材质/款式不符主要扣指令遵循；非编辑保持只扣未经允许的改变；质量/一致/真实感必须有独立可见问题才扣。明显非等比挤压需对照参考图中人物和背景几何，不凭画布比例猜测。notes简短写结论，可写未见明显问题。`;

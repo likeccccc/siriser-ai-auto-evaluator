@@ -2647,11 +2647,65 @@
       `<strong>倒计时提交</strong> <b class="sir-cd${urgent ? " urgent" : ""}">${escapeHtml(text)}</b>` +
       `<button type="button" class="sir-cd-btn" data-cd="cancel">取消提交</button>`;
     el.classList.add("show");
+    document.getElementById("siriser-result")?._resultControls?.clamp();
   }
 
   function clearCountdownInPanel() {
     const el = document.getElementById("siriser-countdown");
     if (el) el.classList.remove("show");
+  }
+
+  // Presentation only: dragging/collapsing must not change submission state.
+  function bindResultPanelControls(panel) {
+    const header = panel.querySelector(".sir-r-h");
+    header.title = "拖动标题栏移动窗口";
+    const toggle = panel.querySelector('[data-r="collapse"]');
+    const title = header.querySelector("strong");
+    let drag = null;
+    function place(left, top) {
+      const rect = panel.getBoundingClientRect();
+      panel.style.right = "auto";
+      panel.style.bottom = "auto";
+      panel.style.left = Math.max(8, Math.min(left, Math.max(8, window.innerWidth - rect.width - 8))) + "px";
+      panel.style.top = Math.max(8, Math.min(top, Math.max(8, window.innerHeight - rect.height - 8))) + "px";
+    }
+    function clamp() {
+      if (!panel.classList.contains("open")) return;
+      const rect = panel.getBoundingClientRect();
+      place(rect.left, rect.top);
+    }
+    function collapse(value) {
+      const rect = panel.getBoundingClientRect();
+      panel.classList.toggle("collapsed", value);
+      toggle.textContent = value ? "展开" : "收起";
+      toggle.setAttribute("aria-expanded", String(!value));
+      title.textContent = value ? "评分结果" : "评分结果（请核对后提交）";
+      place(rect.left, rect.top);
+    }
+    toggle.addEventListener("click", () => collapse(!panel.classList.contains("collapsed")));
+    header.addEventListener("pointerdown", e => {
+      if (e.button !== 0 || e.isPrimary === false || e.target.closest("button,a,input,select,textarea")) return;
+      const rect = panel.getBoundingClientRect();
+      drag = { id: e.pointerId, x: e.clientX, y: e.clientY, left: rect.left, top: rect.top };
+      header.setPointerCapture(e.pointerId);
+      header.classList.add("dragging");
+      e.preventDefault();
+    });
+    header.addEventListener("pointermove", e => {
+      if (!drag || drag.id !== e.pointerId) return;
+      place(drag.left + e.clientX - drag.x, drag.top + e.clientY - drag.y);
+    });
+    function end(e) {
+      if (!drag || drag.id !== e.pointerId) return;
+      drag = null;
+      header.classList.remove("dragging");
+      if (header.hasPointerCapture(e.pointerId)) header.releasePointerCapture(e.pointerId);
+    }
+    header.addEventListener("pointerup", end);
+    header.addEventListener("pointercancel", end);
+    header.addEventListener("lostpointercapture", end);
+    window.addEventListener("resize", clamp);
+    panel._resultControls = { clamp, expand: () => { panel.classList.add("open"); collapse(false); } };
   }
 
   function showResultPanel(scores, report, clicked, meta) {
@@ -2668,7 +2722,7 @@
           <strong>评分结果（请核对后提交）</strong>
           <span class="sir-r-acts">
             <button type="button" data-r="submit">提交当前题</button>
-            <button type="button" data-r="close">关闭</button>
+            <button type="button" data-r="collapse" aria-expanded="true" aria-controls="siriser-result-body">收起</button>
           </span>
         </div>
         <div class="sir-r-b" id="siriser-result-body"></div>`;
@@ -2676,12 +2730,12 @@
       panel.addEventListener("click", (e) => {
         const b = e.target.closest("button[data-r]");
         if (!b) return;
-        if (b.dataset.r === "close") panel.classList.remove("open");
         if (b.dataset.r === "submit") {
           if (submitAndNext()) panel.classList.remove("open");
         }
       });
     }
+    if (!panel._resultControls) bindResultPanelControls(panel);
     const body = panel.querySelector("#siriser-result-body");
     const fmt = (v) => (v == null || v === "na" ? "无" : v);
     const taskCards = (window.__SIRISER_LAST_TASK__ && window.__SIRISER_LAST_TASK__._cards) || [];
@@ -2712,6 +2766,7 @@
         })
         .join("");
     panel.classList.add("open");
+    panel._resultControls.clamp();
   }
 
   // ── 诊断 ──
@@ -2938,6 +2993,7 @@
         <div class="sir-title">工具</div>
         <button type="button" data-act="map"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="8" height="8" rx="1.5"/><rect x="13" y="5" width="8" height="8" rx="1.5"/><rect x="3" y="15" width="8" height="5" rx="1.5"/></svg>对照预览</button>
         <button type="button" data-act="stats"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V10M12 19V5M19 19v-7"/></svg>模型统计</button>
+        <button type="button" data-act="results">评分结果 · 展开</button>
         <button type="button" data-act="fill-demo"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l4 4L20 6"/></svg>自检勾选</button>
         <button type="button" data-act="submit"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>提交当前题</button>
         <button type="button" data-act="diag"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M20 20l-3.5-3.5"/></svg>诊断识别</button>
@@ -3110,6 +3166,13 @@
       if (!btn || (btn.tagName === "BUTTON" && btn.disabled)) return;
       const act = btn.dataset.act;
 
+      if (act === "results") {
+        menu.classList.remove("open");
+        const panel = document.getElementById("siriser-result");
+        if (panel && panel._resultControls) panel._resultControls.expand();
+        else toastMsg("本页暂无评分结果，请先完成评分");
+        return;
+      }
       if (act === "map") {
         menu.classList.remove("open");
         showMappingPreview();
