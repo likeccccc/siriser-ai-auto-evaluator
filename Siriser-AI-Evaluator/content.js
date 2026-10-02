@@ -1758,25 +1758,77 @@
     return task;
   }
 
-  function promptRequiresSquareOutput(prompt) {
-    const s = String(prompt || "").replace(/\s+/g, " ");
-    const ratio = "(?:1|１|一)\\s*(?:[:：]|比)\\s*(?:1|１|一)";
-    return (
-      new RegExp(
-        `(?:输出|生成|导出|画布|画幅|尺寸|比例|图片|图像|output|aspect)[^。；\\n]{0,32}${ratio}`,
-        "i"
-      ).test(s) ||
-      new RegExp(
-        `${ratio}[^。；\\n]{0,20}(?:输出|图片|图像|画布|画幅|比例|output|image)`,
-        "i"
-      ).test(s) ||
-      /(?:输出|生成|导出|output)[^。；\n]{0,20}(?:正方形|方形|square)(?:图片|图像|image)?/i.test(s)
-    );
+  function gcd(a, b) {
+    a = Math.abs(Math.round(a));
+    b = Math.abs(Math.round(b));
+    while (b) {
+      const t = b;
+      b = a % b;
+      a = t;
+    }
+    return a || 1;
   }
 
-  /** 明确要求 1:1 时按图片真实像素做硬校验，避免视觉模型忽略画布比例。 */
-  function applySquareOutputPolicy(scores, task, models) {
-    if (!promptRequiresSquareOutput(task && task.prompt)) return scores;
+  /** 从提示词提取目标宽高比：支持 1:1、4比3、16：9、1024×768、正方形等写法。 */
+  function parseRequestedOutputAspect(prompt) {
+    const s = String(prompt || "")
+      .replace(/[０-９]/g, (ch) => String(ch.charCodeAt(0) - 0xff10))
+      .replace(/一\s*比\s*一/g, "1比1")
+      .replace(/\s+/g, " ");
+    const context = /输出|生成|导出|目标|改为|设为|调整为|画布|画幅|尺寸|大小|分辨率|比例|宽高比|图片|图像|output|aspect|ratio|resolution|size/i;
+    const candidates = [];
+    const candidateScore = (start, end) => {
+      const before = s.slice(Math.max(0, start - 36), start);
+      const after = s.slice(end, Math.min(s.length, end + 36));
+      let score = 0;
+      if (/(?:输出|生成|导出|目标|改为|设为|调整为|画布|画幅|尺寸|大小|分辨率|比例|宽高比|output|aspect|ratio|resolution|size)[^。；\n]{0,14}$/i.test(before)) score += 5;
+      if (/^[^。；\n]{0,14}(?:输出|图片|图像|画布|画幅|比例|尺寸|output|image)/i.test(after)) score += 2;
+      if (/(?:原图|参考图|输入图|原始)[^。；\n]{0,14}$/i.test(before)) score -= 5;
+      return score;
+    };
+    const collect = (re, kind) => {
+      let match;
+      while ((match = re.exec(s))) {
+        const w = Number(match[1]);
+        const h = Number(match[2]);
+        if (!w || !h) continue;
+        const nearby = s.slice(Math.max(0, match.index - 36), Math.min(s.length, re.lastIndex + 36));
+        if (!context.test(nearby)) continue;
+        candidates.push({
+          index: match.index,
+          w,
+          h,
+          kind,
+          score: candidateScore(match.index, re.lastIndex),
+        });
+      }
+    };
+    collect(/(\d{1,5}(?:\.\d{1,3})?)\s*(?:[:：/／]|比)\s*(\d{1,5}(?:\.\d{1,3})?)/gi, "ratio");
+    collect(/(\d{2,5})\s*(?:x|×|\*|＊)\s*(\d{2,5})/gi, "size");
+
+    const wh = s.match(/(?:输出|生成|导出|目标|尺寸|大小|分辨率)[^。；\n]{0,24}宽(?:度)?\s*[:：为]?\s*(\d{2,5})[^。；\n]{0,16}高(?:度)?\s*[:：为]?\s*(\d{2,5})/i);
+    if (wh) candidates.push({ index: wh.index || 0, w: Number(wh[1]), h: Number(wh[2]), kind: "size", score: 8 });
+
+    if (!candidates.length && /(?:输出|生成|导出|目标|画布|画幅)[^。；\n]{0,20}(?:正方形|方形|square)/i.test(s)) {
+      candidates.push({ index: s.length, w: 1, h: 1, kind: "shape", score: 8 });
+    }
+    if (!candidates.length) return null;
+
+    // 优先“输出/目标/改为”附近的比例，降低“原图/参考图”附近比例的优先级。
+    const picked = candidates.sort((a, b) => a.score - b.score || a.index - b.index).pop();
+    const integers = Number.isInteger(picked.w) && Number.isInteger(picked.h);
+    const d = integers ? gcd(picked.w, picked.h) : 1;
+    return {
+      ratio: picked.w / picked.h,
+      label: `${picked.w / d}:${picked.h / d}`,
+      source: picked.kind,
+    };
+  }
+
+  /** 按提示词指定的目标比例校验真实像素，避免视觉模型忽略画布比例。 */
+  function applyRequestedAspectPolicy(scores, task, models) {
+    const expected = parseRequestedOutputAspect(task && task.prompt);
+    if (!expected) return scores;
     const byId = new Map((models || []).map((m) => [String(m.id || "").toUpperCase(), m]));
     return (scores || []).map((s) => {
       if (!s || s._forceNa || s._skipClick || typeof s.alignment !== "number") return s;
@@ -1787,18 +1839,19 @@
       const w = Number(card && card.meta && card.meta.w) || 0;
       const h = Number(card && card.meta && card.meta.h) || 0;
       if (!w || !h) return s;
-      const longShort = Math.max(w, h) / Math.min(w, h);
-      if (longShort <= 1.03) return s;
+      const actualRatio = w / h;
+      const ratioError = Math.max(actualRatio / expected.ratio, expected.ratio / actualRatio);
+      if (ratioError <= 1.03) return s;
 
-      const severe = longShort >= 1.12;
+      const severe = ratioError >= 1.12;
       const cap = severe ? 5 : 7;
       s.alignment = Math.min(s.alignment, cap);
-      const tag = `[输出${w}×${h}，未达1:1]`;
-      if (!String(s.notes || "").includes("未达1:1")) {
+      const tag = `[输出${w}×${h}，未达${expected.label}]`;
+      if (!String(s.notes || "").includes(`未达${expected.label}`)) {
         s.notes = `${s.notes ? s.notes + " " : ""}${tag}`;
       }
-      s._aspectMismatch = { expected: "1:1", width: w, height: h, cap };
-      log(`比例校验 ${id}: ${w}x${h} ≠ 1:1 → alignment≤${cap}`, "err");
+      s._aspectMismatch = { expected: expected.label, width: w, height: h, cap };
+      log(`比例校验 ${id}: ${w}x${h} 未达 ${expected.label} → alignment≤${cap}`, "err");
       return s;
     });
   }
@@ -1910,7 +1963,7 @@
       return { ...s, model: src ? src.id : s.model };
     });
 
-    scores = applySquareOutputPolicy(scores, task, modelsToEval);
+    scores = applyRequestedAspectPolicy(scores, task, modelsToEval);
 
     await applyScores(scores, {
       elapsedMs: Date.now() - t0,
