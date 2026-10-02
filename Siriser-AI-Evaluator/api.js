@@ -242,6 +242,7 @@
       notes: s.notes || "",
       defects: s.defects || [],
       flags: global.SiriserScoringPolicy.normalize(s.flags),
+      highEvidence: global.SiriserScoringPolicy.normalizeEvidence(s.highEvidence),
     }));
   }
 
@@ -367,7 +368,7 @@
         `逐张独立按证据打分，同质量允许同分。\n` +
         `【输出比例】先从指令读取目标比例或尺寸（如 1:1、4:3、3:4、16:9、1024×768），再核对每张生成图真实宽高；不符合即为明确指令未完成。\n` +
         `【形态检查】改变画布比例应通过正常裁切、扩图或重构完成；若把原内容非等比拉伸、压扁后硬塞进目标画幅，五维都要扣分。\n` +
-        `每个模型返回flags及简短notes，不强行找问题；本次响应所有模型合计最多4条flags，优先严重缺陷，证据尽量≤20字，避免重复notes。` +
+        `每个模型返回flags及简短notes；9/10的维度须返回highEvidence:{维度名:"具体核查结果"}，每条尽量≤16字。不强行找问题；本次响应所有模型合计最多4条flags，优先严重缺陷，证据尽量≤20字，避免重复notes。` +
         (task.histHint || ""),
     });
 
@@ -764,7 +765,7 @@
       const out = { model: a.model, notes: "", defects: a.defects || [], ...global.SiriserScoringPolicy.merge(a.flags, b.flags) };
       DIM_KEYS.forEach((k) => {
         if (typeof a[k] === "number" && typeof b[k] === "number") {
-          out[k] = Math.round((a[k] + b[k]) / 2);
+          out[k] = Math.floor((a[k] + b[k]) / 2);
         } else {
           out[k] = a[k] != null ? a[k] : b[k];
         }
@@ -773,9 +774,13 @@
       out._diff = diff;
       out._a = a;
       out._b = b;
-      if (diff >= threshold || out.pendingFlags.length) {
+      out.highEvidence = {};
+      const ea = global.SiriserScoringPolicy.normalizeEvidence(a.highEvidence);
+      const eb = global.SiriserScoringPolicy.normalizeEvidence(b.highEvidence);
+      DIM_KEYS.forEach(k => { if (ea[k] && eb[k]) out.highEvidence[k] = ea[k]; });
+      if (diff >= threshold || out.pendingFlags.length || global.SiriserScoringPolicy.needsHighReview(out)) {
         needReview.push(out);
-        out.notes = (a.notes || "") + ` [双分差${diff}→待审]`;
+        out.notes = (a.notes || "") + ` [分差${diff}/缺陷或高分核查→待审]`;
       } else {
         out.notes = (a.notes ? a.notes + " " : "") + `[双模型±${diff}取中]`;
       }
@@ -788,10 +793,10 @@
   function pickPolicyReview(items) {
     return items.filter((s) => {
       // Dual disagreements have already entered the shared review queue.
-      if (s._a || /\[已审核\]/.test(s.notes || "")) return false;
+      if (s._a || s._reviewed) return false;
       const capped = global.SiriserScoringPolicy.apply([s])[0];
-      const conflict = capped.appliedCaps.some(c => s[c.dim] - c.cap >= 2);
-      if (conflict) s._policy = "缺陷证据与高分冲突";
+      const conflict = global.SiriserScoringPolicy.needsHighReview(s) || capped.appliedCaps.some(c => s[c.dim] - c.cap >= 2);
+      if (conflict) s._policy = "高分依据不足、满分待核查或缺陷与高分冲突";
       return conflict;
     });
   }
@@ -814,14 +819,14 @@
       if (!r) return s;
       return {
         ...r,
-        notes: ((r.notes || "") + " ⚠已规则审核").trim(),
+        notes: ((r.notes || "") + (r._reviewed ? " ⚠已规则审核" : " ⚠规则审核未完成")).trim(),
       };
     });
   }
 
   /**
    * 审核次数上限 + 时间预算，防止 15 个模型各审 2 分钟导致超时。
-   * 优先审分差最大的；deadline 可跨多次 reviewScores 共用。
+   * 优先审严重争议及无依据高分；deadline 可跨多次 reviewScores 共用。
    */
   function capReviewList(items, cfg, deadline) {
     const max = Math.max(0, Number(cfg.MAX_REVIEW ?? 3));
@@ -831,10 +836,10 @@
     }
     const list = (items || [])
       .slice()
-      .sort((x, y) => (Number(y._diff) || 0) - (Number(x._diff) || 0));
+      .sort((x, y) => global.SiriserScoringPolicy.reviewPriority(y) - global.SiriserScoringPolicy.reviewPriority(x));
     if (list.length > max) {
       slog(
-        `审核裁剪到 ${max} 个（按分差优先：${list
+        `审核裁剪到 ${max} 个（按缺陷争议/高分风险/分差：${list
           .slice(0, max)
           .map((x) => x.model + "±" + (x._diff || 0))
           .join(",")}）`
@@ -896,6 +901,7 @@
           `评委A：${DIM_KEYS.map((k) => k + "=" + a[k]).join(" ")} notes=${a.notes || ""}\n` +
           `评委B：${DIM_KEYS.map((k) => k + "=" + b[k]).join(" ")} notes=${b.notes || ""}\n` +
           `评委A缺陷：${JSON.stringify(a.flags || [])}\n评委B缺陷：${JSON.stringify(b.flags || [])}\n` +
+          `本次重点复核高分维度：逐项对照具体属性和保持区域，不沿用评委结论；9/10必须返回对应highEvidence。没有足够可见依据时不进入高分档。\n` +
           `请独立核查争议与证据，仅保留确认的flags，排除不成立项。只输出JSON {"scores":[{"model":"${item.model}","alignment":8,"quality":8,"preservation":8,"consistency":8,"realism":8,"notes":"结论","flags":[]}]}，分数为1–10整数或null，允许同分。`,
       });
       (cleanTask.referenceImages || []).forEach((src, i) => {
@@ -923,10 +929,11 @@
           subCfg,
           userParts
         );
-        const hit = scores.find((s) => normModelId(s.model) === item.model) || scores[0];
+        const hit = scores.find((s) => normModelId(s.model) === item.model);
         if (hit && scoreAvg(hit) != null) {
           out.push({
             ...hit,
+            _reviewed: true,
             model: item.model,
             notes: (hit.notes || "") + " [已审核]",
           });

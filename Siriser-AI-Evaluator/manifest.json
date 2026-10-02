@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Siriser AI Auto Evaluator",
-  "version": "1.0.24",
+  "version": "1.0.25",
   "description": "自动读取 Siriser Image Benchmark 任务，调用自定义视觉 API 完成五维评分并填表提交。",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": ["http://*/*", "https://*/*"],

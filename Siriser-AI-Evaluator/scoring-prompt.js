@@ -171,6 +171,7 @@ window.buildEvalRequest = function buildEvalRequest(task) {
               rcr: { type: "number" },
               notes: { type: "string" },
               defects: { type: "array" },
+              highEvidence: { type: "object", additionalProperties: { type: "string" } },
               flags: { type: "array", maxItems: 4, items: { type: "object", required: ["code", "severity", "evidence"], properties: { code: { type: "string" }, severity: { enum: ["minor", "major"] }, evidence: { type: "string" } } } },
             },
           },
