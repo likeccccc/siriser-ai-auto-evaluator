@@ -9,12 +9,13 @@ function load() {
   c.self = c; c.window = c;
   vm.runInContext(fs.readFileSync(path.join(dir, 'scoring-policy.js'), 'utf8'), c);
   // Expose internals only in this isolated test context; production exports unchanged.
-  vm.runInContext(fs.readFileSync(path.join(dir, 'api.js'), 'utf8').replace('global.SiriserAPI = {', 'global.SiriserAPI = { capReviewList, reviewScores, pickPolicyReview, callOpenAIBatch,'), c);
+  vm.runInContext(fs.readFileSync(path.join(dir, 'api.js'), 'utf8').replace('global.SiriserAPI = {', 'global.SiriserAPI = { prepareReviewImages, capReviewList, reviewScores, pickPolicyReview, callOpenAIBatch,'), c);
   return c;
 }
 const flag = (code, severity = 'major') => ({ code, severity, evidence: '人物躯干相对参考明显横向拉宽' });
 const highEvidence = { alignment:'尖领细飘带及金扣均与要求一致', quality:'领袖边界完整且手包接触自然', preservation:'脸型发带手势与参考对应保持', consistency:'人物投影与地面光向相互一致', realism:'皮革纹理自然且手指关节合理' };
-const score = (flags = []) => ({ model: 'A', alignment: 10, quality: 10, preservation: 10, consistency: 10, realism: 10, notes: '', flags, highEvidence, _reviewed: true });
+const checks = Object.entries(highEvidence).map(([dim,observed])=>({dim,expected:dim+'对应区域满足要求',observed,status:'pass'}));
+const score = (flags = []) => ({ model: 'A', alignment: 10, quality: 10, preservation: 10, consistency: 10, realism: 10, notes: '', flags, highEvidence, checks, _reviewed: true });
 test('major distortion caps five dimensions without mutating source', () => {
   const c = load(), s = score([flag('non_uniform_distortion')]);
   const r = c.SiriserScoringPolicy.apply([s])[0];
@@ -64,7 +65,7 @@ test('successful review replaces disputed flags; request retains token ceiling',
   c.fetch=async(url,opts)=>{ request=JSON.parse(opts.body); return {ok:true,status:200,json:async()=>({choices:[{message:{content:JSON.stringify({scores:[score()]})},finish_reason:'stop'}]})}; };
   const r=await c.SiriserAPI.reviewScores({prompt:'换装',referenceImages:[],models:[{id:'A',images:[]}]},[{...score(),pendingFlags:[flag('identity_changed')]}],{OPENAI_MODEL_REVIEW:'mock',MAX_REVIEW:1});
   assert.equal(r[0].flags.length,0); assert.equal(r[0].pendingFlags,undefined);
-  assert.equal(request.max_tokens,768);
+  assert.equal(request.max_tokens,1024);
   assert.match(request.messages[0].content,/允许五维同分/);
 });
 test('manifest and manual injection load policy before consumers', () => {
@@ -75,7 +76,7 @@ test('manifest and manual injection load policy before consumers', () => {
 });
 test('empty or generic evidence cannot pass high score gate; lower scores and null stay', () => {
   const p=load().SiriserScoringPolicy;
-  const r=p.apply([{...score(),highEvidence:{},quality:6,realism:null}])[0];
+  const r=p.apply([{...score(),checks:[],highEvidence:{},quality:6,realism:null}])[0];
   assert.equal(r.alignment,8); assert.equal(r.preservation,8);
   assert.equal(r.quality,6); assert.equal(r.realism,null);
   assert.match(p.describe(r),/高分缺少逐维核查依据/);
@@ -96,7 +97,7 @@ test('9 plus 10 stays 9; dual missing evidence enters bounded review', () => {
   const r=c.SiriserAPI.mergeDualScores([a],[score()],3);
   assert.equal(r.merged[0].alignment,9);
   assert.equal(r.needReview.length,1); // Four or more high dimensions are sampled for review.
-  const empty=c.SiriserAPI.mergeDualScores([{...a,highEvidence:{}}],[a],3);
+  const empty=c.SiriserAPI.mergeDualScores([{...a,checks:[],highEvidence:{}}],[a],3);
   assert.equal(empty.needReview.length,1);
   assert.equal(c.SiriserScoringPolicy.apply(empty.merged)[0].alignment,8);
 });
@@ -106,14 +107,14 @@ test('single unsupported highs selected even when flags empty', () => {
 });
 test('review success still requires evidence; missing evidence cannot bypass final gate', async () => {
   const c=load();
-  c.fetch=async()=>({ok:true,status:200,json:async()=>({choices:[{message:{content:JSON.stringify({scores:[{...score(),highEvidence:{}}]})},finish_reason:'stop'}]})});
+  c.fetch=async()=>({ok:true,status:200,json:async()=>({choices:[{message:{content:JSON.stringify({scores:[{...score(),checks:[],highEvidence:{}}]})},finish_reason:'stop'}]})});
   const r=await c.SiriserAPI.reviewScores({prompt:'换装',referenceImages:[],models:[{id:'A',images:[]}]},[score()],{OPENAI_MODEL_REVIEW:'mock',MAX_REVIEW:1});
   assert.equal(r[0]._reviewed,true);
   assert.equal(c.SiriserScoringPolicy.apply(r)[0].alignment,8);
 });
 test('high score review retains count and deadline limits', () => {
   const c=load();
-  const items=['A','B','C','D'].map(model=>({...score(),model,_reviewed:false,highEvidence:{}}));
+  const items=['A','B','C','D'].map(model=>({...score(),model,_reviewed:false,checks:[],highEvidence:{}}));
   assert.equal(c.SiriserAPI.capReviewList(items,{MAX_REVIEW:1},Date.now()+10000).length,1);
   assert.equal(c.SiriserAPI.capReviewList(items,{MAX_REVIEW:3},Date.now()-1).length,0);
   const skipped=c.SiriserScoringPolicy.apply(items);
@@ -147,4 +148,53 @@ test('normal cropping is not inferred as defect from notes; prompt distinguishes
   assert.equal(r.realism,10);
   assert.match(p.prompt,/正常被最终画面边缘裁切/);
   assert.match(p.prompt,/不能只扣preservation/);
+});
+test('old boilerplate evidence and repeated observations do not unlock highs', () => {
+  const p=load().SiriserScoringPolicy;
+  assert.equal(p.apply([{...score(),checks:[]}])[0].realism,8);
+  const repeated=checks.map(c=>({...c,observed:'人物服装细节与要求一致'}));
+  assert.equal(p.apply([{...score(),checks:repeated}])[0].quality,8);
+});
+test('observed failures cap scores even without flags; unknown is not a fabricated failure', () => {
+  const p=load().SiriserScoringPolicy;
+  const changed=status=>checks.map(c=>c.dim==='alignment'?{...c,status}:c);
+  assert.equal(p.apply([{...score(),checks:changed('fail')}])[0].alignment,6);
+  assert.equal(p.apply([{...score(),checks:changed('partial')}])[0].alignment,8);
+  assert.equal(p.apply([{...score(),alignment:7,checks:changed('unknown')}])[0].alignment,7);
+  assert.equal(p.apply([{...score(),checks:changed('unknown')}])[0].alignment,8);
+});
+test('observation disagreement queues blind review without numeric disagreement', () => {
+  const c=load(), a={...score(),alignment:7,quality:7,preservation:7,consistency:7,realism:7};
+  const b={...a,checks:checks.map(row=>row.dim==='quality'?{...row,status:'fail'}:row)};
+  const merged=c.SiriserAPI.mergeDualScores([a],[b],3);
+  assert.equal(merged.needReview.length,1);
+  assert.equal(c.SiriserScoringPolicy.apply(merged.merged)[0].quality,7);
+});
+test('blind review request contains neither prior notes, flags nor prior score vectors', async () => {
+  const c=load();let request;
+  c.fetch=async(url,opts)=>{request=JSON.parse(opts.body);return {ok:true,status:200,json:async()=>({choices:[{message:{content:JSON.stringify({scores:[score()]})},finish_reason:'stop'}]})};};
+  const prior={...score(),notes:'SECRET_PRIOR_NOTE',flags:[{...flag('wrong_color'),evidence:'SECRET_PRIOR_DEFECT'}]};
+  await c.SiriserAPI.reviewScores({prompt:'换装',referenceImages:[],models:[{id:'A',images:[]}]},[prior],{OPENAI_MODEL_REVIEW:'mock',MAX_REVIEW:1});
+  const user=JSON.stringify(request.messages[1]);
+  assert.match(user,/独立盲审/); assert.doesNotMatch(user,/SECRET_PRIOR|alignment=10|评委A：/);
+});
+test('HD review uses original sources at 1280 and caches them', async () => {
+  const c=load(),requests=[];
+  c.chrome={runtime:{sendMessage:async m=>{if(m.type==='SIRISER_FETCH_IMAGE'){requests.push(m);return {ok:true,dataUrl:'data:image/jpeg;base64,aGQ='};}return {ok:true};}}};
+  const one={id:'A',images:['low-output']};
+  const task={referenceImages:['low-ref'],models:[one],_reviewSources:{referenceImages:['original-ref'],models:[{id:'A',images:['original-output']}]}};
+  const first=await c.SiriserAPI.prepareReviewImages(task,one,Date.now()+10000);
+  await c.SiriserAPI.prepareReviewImages(task,one,Date.now()+10000);
+  assert.equal(requests.length,2); assert.equal(requests.every(r=>r.max===1280),true);
+  assert.equal(requests.some(r=>r.url==='original-ref'),true);
+  assert.equal(first.images[0],'data:image/jpeg;base64,aGQ=');
+  const fallback=await c.SiriserAPI.prepareReviewImages(task,one,Date.now()+10);
+  assert.equal(fallback.images[0],'low-output');
+});
+test('three-image observation output has bounded larger allowance', async () => {
+  const c=load();let request;
+  c.fetch=async(url,opts)=>{request=JSON.parse(opts.body);return {ok:true,status:200,json:async()=>({choices:[{message:{content:'{"scores":[]}'},finish_reason:'stop'}]})};};
+  const models=['A','B','C'].map(id=>({id,images:[]}));
+  await c.SiriserAPI.callOpenAIBatch({prompt:'换装',referenceImages:[]},models,{OPENAI_MODEL:'mock',MAX_OUTPUT_TOKENS:768});
+  assert.equal(request.max_tokens,2304);
 });

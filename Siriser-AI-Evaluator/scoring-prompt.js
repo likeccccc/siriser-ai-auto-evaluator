@@ -171,7 +171,7 @@ window.buildEvalRequest = function buildEvalRequest(task) {
               rcr: { type: "number" },
               notes: { type: "string" },
               defects: { type: "array" },
-              highEvidence: { type: "object", additionalProperties: { type: "string" } },
+              checks: { type: "array", maxItems: 12, items: { type: "object", required: ["dim", "expected", "observed", "status"], properties: { dim: { enum: ["alignment", "quality", "preservation", "consistency", "realism"] }, expected: { type: "string" }, observed: { type: "string" }, status: { enum: ["pass", "partial", "fail", "unknown"] } } } },
               flags: { type: "array", maxItems: 4, items: { type: "object", required: ["code", "severity", "evidence"], properties: { code: { type: "string" }, severity: { enum: ["minor", "major"] }, evidence: { type: "string" } } } },
             },
           },

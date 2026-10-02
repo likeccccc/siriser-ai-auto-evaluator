@@ -45,6 +45,30 @@
     return { flags, pendingFlags };
   }
   const dims = ["alignment", "quality", "preservation", "consistency", "realism"];
+  function normalizeChecks(value) {
+    const seen = new Set();
+    return (Array.isArray(value) ? value : []).filter(c => c && dims.includes(c.dim) &&
+      ["pass", "partial", "fail", "unknown"].includes(c.status) &&
+      typeof c.expected === "string" && c.expected.trim() && typeof c.observed === "string" && c.observed.trim())
+      .slice(0, 12).map(c => ({ dim: c.dim, expected: c.expected.trim().slice(0, 70), observed: c.observed.trim().slice(0, 70), status: c.status }))
+      .filter(c => { const key = JSON.stringify(c); if (seen.has(key)) return false; seen.add(key); return true; });
+  }
+  // A structured observation is still model testimony, not pixel-level verification.
+  function observationEvidence(s) {
+    if (s._a && s._b) {
+      const a = observationEvidence(s._a), b = observationEvidence(s._b);
+      return Object.fromEntries(dims.filter(d => a[d] && b[d]).map(d => [d, a[d]]));
+    }
+    const checks = normalizeChecks(s.checks), out = {};
+    for (const dim of dims) {
+      const items = checks.filter(c => c.dim === dim);
+      if (!items.length || items.some(c => c.status !== "pass")) continue;
+      if (items.some(c => c.observed.length < 6 || /无法|不确定|看不清|符合要求|未见明显问题|无明显问题|完美/.test(c.observed))) continue;
+      if (items.some(c => checks.some(other => other.dim !== dim && other.observed === c.observed))) continue;
+      out[dim] = items.map(c => `${c.expected}→${c.observed}`).join("；");
+    }
+    return out;
+  }
   function normalizeEvidence(value) {
     const out = {};
     for (const dim of dims) {
@@ -57,7 +81,7 @@
     return out;
   }
   function highScoreIssues(s) {
-    const evidence = normalizeEvidence(s.highEvidence);
+    const evidence = observationEvidence(s);
     return dims.filter(d => s[d] >= 9 && (!evidence[d] || (s[d] === 10 && !s._reviewed)));
   }
   function needsHighReview(s) {
@@ -65,11 +89,25 @@
   }
   function reviewPriority(s) {
     const disputed = normalize(s.pendingFlags).some(f => f.severity === "major") ? 10 : 0;
-    return disputed + highScoreIssues(s).length * 2 + (needsHighReview(s) ? 3 : 0) + (Number(s._diff) || 0);
+    return disputed + (s._observationConflict ? 5 : 0) + highScoreIssues(s).length * 2 + (needsHighReview(s) ? 3 : 0) + (Number(s._diff) || 0);
   }
   function apply(list) {
     return list.map(s => {
-      const out = { ...s, flags: normalize(s.flags), highEvidence: normalizeEvidence(s.highEvidence), appliedCaps: [], _scoreWarnings: [] };
+      const out = { ...s, checks: normalizeChecks(s.checks), flags: normalize(s.flags), highEvidence: observationEvidence(s), appliedCaps: [], _scoreWarnings: [] };
+      // Each judge's observations are retained; unilateral findings remain disputed.
+      for (const dim of dims) {
+        const ceiling = list => {
+          const rows = normalizeChecks(list).filter(c => c.dim === dim);
+          if (rows.some(c => c.status === "fail")) return 6;
+          const partial = rows.filter(c => c.status === "partial").length;
+          return partial > 1 ? 7 : partial ? 8 : 10;
+        };
+        const cap = s._a && s._b ? Math.max(ceiling(s._a.checks), ceiling(s._b.checks)) : ceiling(out.checks);
+        if (typeof out[dim] === "number" && out[dim] > cap) {
+          out[dim] = cap;
+          out.appliedCaps.push({ code: "observation_mismatch", dim, cap });
+        }
+      }
       for (const dim of dims) {
         if (out[dim] < 9 || typeof out[dim] !== "number") continue;
         let cap = 10, reason = "";
@@ -100,7 +138,8 @@
     const confirmed = normalize(s.flags).map(f => `${rules[f.code][0]}（${f.severity === "major" ? "明显" : "轻微"}）：${f.evidence}`);
     const pending = normalize(s.pendingFlags).map(f => `待复核·${rules[f.code][0]}：${f.evidence}`);
     const caps = (s.appliedCaps || []).map(c => `${c.dim}≤${c.cap}`);
-    const evidence = Object.entries(normalizeEvidence(s.highEvidence)).filter(([d]) => s[d] >= 9).map(([d,v]) => `高分核查·${d}：${v}`);
+    const rows = s._a && s._b ? [...normalizeChecks(s._a.checks).map(c=>({...c,judge:"A"})), ...normalizeChecks(s._b.checks).map(c=>({...c,judge:"B"}))] : normalizeChecks(s.checks);
+    const evidence = rows.map(c => `核查${c.judge || ""}·${c.dim}（${({pass:"完成",partial:"部分完成",fail:"未完成",unknown:"看不清"})[c.status]}）：${c.expected}→${c.observed}`);
     return [...confirmed, ...pending, ...evidence, ...(s._scoreWarnings || []), ...(caps.length ? [`规则上限：${[...new Set(caps)].join("、")}`] : [])].join("；");
   }
   const prompt = `逐项核对提示词：要改什么、必须保留什么、禁止什么、目标尺寸。只按可见证据评分，允许同分，不为拉开差距捏造缺陷。
@@ -114,6 +153,7 @@ flags只列有证据的缺陷，最多4条最重要项，无缺陷为[]；每条
   const rubric = `先列明本题主要编辑要求、必须保持项及禁止项，逐项判断完成/部分完成/未完成/不可确认，再独立定五维分档；整体好看不代表细项全部完成。原图已有且未加重的问题不扣分。
 alignment：1–3方向错误/多数核心失败；4–5部分核心实现但重要遗漏；6–7主体改对但多项具体属性不符；8主要要求完成但仍有轻微偏差；9关键及细项均核实、仅极小偏差；10全部明确要求逐项核实无偏差。不得只看服装类别或颜色。
 quality：查领袖扣袋、边界、手物接触、纹理与细节结构；preservation：逐一对照脸/头发/配饰/姿势/身体比例/背景构图中明确保留项；consistency：查透视、尺度、光向、阴影、反射、融合；realism：按目标风格查人体结构、材质、纹理与美学自然程度。这四维1–3严重破坏，4–5明显缺陷，6–7多处局部问题或一处中等问题，8轻微问题，9细节核实后近乎无瑕，10充分核实且无可见问题。
-9/10必须为该维返回highEvidence对象条目（键为维度名，值为≤25字的具体核对结果，写位置和对应属性；不是复述“符合/很好/无问题”）。看不清≠确认正确：不能给9/10，不捏造缺陷；缺乏足够依据暂不进入高分档。未到9的维度无需highEvidence。flags为空不等于满分。不要按模型字母、历史排名、固定分布给分；有证据的优秀结果仍可高分。`;
-  g.SiriserScoringPolicy = { normalize, normalizeEvidence, highScoreIssues, needsHighReview, reviewPriority, merge, apply, describe, prompt: prompt + "\n" + rubric };
+9/10需要本维具体观察支持；看不清不是确认正确。flags为空不等于满分，不按字母或固定分布给分。`;
+  const observationPrompt = `【输出协议，以本条为准】不要输出highEvidence。每个模型先返回checks数组，再给五维分数、flags和notes。checks每条{dim,expected,observed,status}，dim为五维键名；expected写本题具体要求或该区域应有的结构，observed写实际看见的位置和属性，各≤16字；status只能是pass/partial/fail/unknown。每维至少1条，主要编辑要求可拆2–4条，总计5–8条；不可见用unknown。禁止把提示词直接当观察结果，禁止五维复制同一句。先查主次对象、原图边界与扩图区、形态、材质、接触与光影，再定分，输出的是可核对事实而非思维过程。没有本维pass观察支持不得给9/10；partial按轻微或多处问题评分，fail按明确失败评分，unknown不伪装成缺陷。不凭旧评委分数判断。`;
+  g.SiriserScoringPolicy = { normalize, normalizeChecks, observationEvidence, normalizeEvidence, highScoreIssues, needsHighReview, reviewPriority, merge, apply, describe, prompt: prompt + "\n" + rubric + "\n" + observationPrompt };
 })(typeof self !== "undefined" ? self : window);
