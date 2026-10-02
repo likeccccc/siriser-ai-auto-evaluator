@@ -15,7 +15,7 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["config.js", "scoring-policy.js", "scoring-prompt.js", "api.js", "content.js"],
+      "js": ["config.js", "scoring-prompt.js", "api.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_idle",
       "all_frames": true

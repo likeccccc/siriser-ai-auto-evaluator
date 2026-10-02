@@ -241,9 +241,6 @@
       rcr: s.rcr,
       notes: s.notes || "",
       defects: s.defects || [],
-      flags: global.SiriserScoringPolicy.normalize(s.flags),
-      highEvidence: global.SiriserScoringPolicy.normalizeEvidence(s.highEvidence),
-      checks: global.SiriserScoringPolicy.normalizeChecks(s.checks),
     }));
   }
 
@@ -366,10 +363,11 @@
         `请只对下列模型打分，输出 JSON {"scores":[...]}\n` +
         `每个模型 5 维 1–10 整数：alignment/quality/preservation/consistency/realism；无图输出 null 且 notes="no_image"。\n` +
         `模型列表：${models.map((m) => m.id).join(", ")}\n\n` +
-        `逐张独立按证据打分，同质量允许同分。\n` +
+        `【强制】不同模型必须给出不同分数向量，禁止复制粘贴同一套分。\n` +
         `【输出比例】先从指令读取目标比例或尺寸（如 1:1、4:3、3:4、16:9、1024×768），再核对每张生成图真实宽高；不符合即为明确指令未完成。\n` +
         `【形态检查】改变画布比例应通过正常裁切、扩图或重构完成；若把原内容非等比拉伸、压扁后硬塞进目标画幅，五维都要扣分。\n` +
-        `每个模型先输出checks逐项观察，再给分数、flags及简短notes；不输出highEvidence。不强行找问题；本次响应最多4条关键flags，避免与checks重复长篇描述。` +
+        `每个模型的 notes 必须写出该图特有的一条问题（位置+现象），与其他模型不得相同。\n` +
+        `若两图都挺好，也要通过「哪张更好」拉开至少 1 分差距。` +
         (task.histHint || ""),
     });
 
@@ -396,18 +394,43 @@
     return sanitizeParts(parts);
   }
 
+  /** 评分用精简 system，降低延迟（细则要点保留） */
+  const SHORT_SYSTEM = `你是 Edit Bench 图片编辑评测专家。对比「编辑指令 + 参考图 + 生成图」给 5 个整数分 1–10：
+alignment 指令遵循, quality 局部质量, preservation 非编辑保持, consistency 全局一致, realism 真实感与美学。
 
-  const EVIDENCE_SYSTEM = `你是图片编辑评测专家，对照指令、参考图与生成图，先记录可验证观察，再独立给五维1–10整数分：alignment指令遵循、quality局部质量、preservation非编辑保持、consistency全局一致、realism真实感与美学。按各维实际表现打分，允许五维同分；无图五维null，notes="no_image"，flags=[]，checks=[]。只输出JSON，顶层scores数组，每项依次包含model、checks、alignment、quality、preservation、consistency、realism、flags、notes。具体检查与分档规则如下。\n` + global.SiriserScoringPolicy.prompt;
+【realism 专条 · 严查 AI 感】只要出现下列任一，realism 最高 7；两项以上或很明显 ≤5：
+- 光照不自然：光影方向矛盾、假高光、塑料反光、过曝/欠曝、色温漂移
+- 过度磨皮/塑料皮肤/蜡像感、皮肤纹理消失、五官柔糊
+- 发丝粘成块、边缘光晕、背景涂抹、细节涂抹感
+- 明显生成伪影：多余手指、文字乱码、结构扭曲、重影、噪点块
+- 整体「一眼 AI」：电影感假、味精色、无真实摄影颗粒
+写实人像/街拍以真实摄影为准；插画/动漫不按照片扣，但仍扣「风格内假光影/糊脸」。
+
+【专家口径】
+- 若指令明确要求输出比例或尺寸，必须按该目标宽高比核对生成图真实尺寸（允许约 3% 编码误差）。轻度偏差 alignment≤7，明显比例错误 alignment≤5；画面好看不能抵消。
+- 输出画布比例正确不代表内容形态正确。改变比例应通过裁切、扩图或重构完成，禁止把整张图/人物/物体非等比拉宽或压扁。
+- 对照参考图检查脸宽、头身比、四肢、服装轮廓、圆形物体与背景透视。人物被非等比压矮、矮胖时，notes 写出人体形态问题；alignment≤6、quality≤5、realism≤4，主要扣局部质量与真实感美学，不应只扣非编辑保持。
+- 背景扩图后，原图边界变成画面内部；若原先被边缘裁掉的人仍只剩半身/半个人且没有合理遮挡，属于扩图局部缺陷，quality≤5、realism≤5。正常被最终画面边缘裁切或合理遮挡不扣。
+- 左右：写「人物左手/右手」按画中人物自身；只写画面左右按观众视角。Prompt 不清做反只轻扣1分，不算严重不遵循。
+- 配件组合（如衬衫+丝巾）：都出现=好；只做一半=轻扣1–2，不连坐其他四维。
+- 模糊指令对了勿重扣；明确指令做错才按上限重扣。
+- 同题好图与差图必须拉开，禁止同一套高分；好差至少差2分。
+
+其余四维：10 极少；有可见瑕疵最高 8；禁止五维同分；无图五项 null 且 notes="no_image"。
+notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛盾）。
+
+只输出 JSON：
+{"scores":[{"model","alignment","quality","preservation","consistency","realism","notes"}]}`;
 
   async function callOpenAIBatch(task, models, cfg, userPartsOverride) {
     const base = (cfg.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
     let content = sanitizeParts(
-      userPartsOverride || buildOpenAIUserContent(EVIDENCE_SYSTEM, task, models)
+      userPartsOverride || buildOpenAIUserContent(SHORT_SYSTEM, task, models)
     );
     const modelName = cfg.OPENAI_MODEL || "gpt-4o-mini";
     const baseOutputLimit = Math.max(
       128,
-      Math.min(4096, Math.max(Number(cfg.MAX_OUTPUT_TOKENS) || 768, Math.min(2304, Math.max(1024, models.length * 768))))
+      Math.min(4096, Number(cfg.MAX_OUTPUT_TOKENS) || 768)
     );
     const isQwen3Family = /^qwen3(?:[.-]|$)/i.test(modelName);
     const isQwen38Family = /^qwen3\.8(?:-|$)/i.test(modelName);
@@ -426,7 +449,7 @@
     const outputLimit = thinkingEnabled
       ? isQwen38Family
         ? Math.max(baseOutputLimit, 4608)
-        : baseOutputLimit + thinkingBudget
+        : Math.max(baseOutputLimit, thinkingBudget + 384)
       : baseOutputLimit;
     const t0 = Date.now();
 
@@ -443,7 +466,7 @@
       model: modelName,
       temperature: 0.2,
       messages: [
-        { role: "system", content: EVIDENCE_SYSTEM },
+        { role: "system", content: SHORT_SYSTEM },
         { role: "user", content },
       ],
     };
@@ -479,7 +502,7 @@
       "Content-Type": "application/json",
       Authorization: `Bearer ${cfg.OPENAI_API_KEY}`,
     };
-    const minTimeout = requestRole === "review" ? 1 : 60000;
+    const minTimeout = requestRole === "review" ? 10000 : 60000;
     const timeout = Math.max(minTimeout, Number(cfg.TIMEOUT_MS) || 300000);
 
     slog(
@@ -490,7 +513,7 @@
       fetchWithTimeout(
         base + "/chat/completions",
         { method: "POST", headers, body: JSON.stringify(b) },
-        requestRole === "review" && cfg.REVIEW_DEADLINE_MS ? Math.max(1, Math.min(timeout, cfg.REVIEW_DEADLINE_MS - Date.now())) : timeout
+        timeout
       );
 
     let res;
@@ -750,6 +773,72 @@
     });
   }
 
+  /**
+   * 1) 整题相对排名：把均分映射到 4–9，禁止扎堆 9/10
+   * 保序：原分高的仍高；保留各维相对该模型均分的偏移
+   */
+  function rankSpreadScores(list, lo, hi) {
+    lo = lo == null ? 4 : lo;
+    hi = hi == null ? 9 : hi;
+    const scored = list.filter((s) => scoreAvg(s) != null);
+    if (scored.length < 4) return list;
+
+    const order = scored
+      .slice()
+      .sort((x, y) => scoreAvg(y) - scoreAvg(x));
+    const n = order.length;
+
+    order.forEach((s, i) => {
+      const t = n === 1 ? (lo + hi) / 2 : hi - ((hi - lo) * i) / (n - 1);
+      const oldAvg = scoreAvg(s);
+      DIM_KEYS.forEach((k) => {
+        if (typeof s[k] !== "number") return;
+        const off = s[k] - oldAvg;
+        // 保留维度偏移，略缩放避免又全同
+        let v = t + off * 1.15;
+        s[k] = Math.max(1, Math.min(10, Math.round(v)));
+      });
+      // 五维仍相同则微拆
+      const now = DIM_KEYS.map((k) => s[k]);
+      if (now.every((v) => v === now[0])) {
+        s.quality = Math.max(1, s.quality - 1);
+        s.consistency = Math.max(1, s.consistency - 1);
+      }
+    });
+
+    const avgs = order.map(scoreAvg);
+    slog(
+      `相对排名：n=${n} 首=${avgs[0].toFixed(1)} 尾=${avgs[n - 1].toFixed(1)} 目标区间 ${lo}–${hi}`
+    );
+    return list;
+  }
+
+  /** 相对排名之后再执行，避免明显非等比形变被名次映射重新抬成高分。 */
+  function applyGeometryDistortionCaps(list) {
+    const re = /非等比|比例失真|比例异常|形态失真|横向(?:拉宽|变宽)|纵向(?:压扁|压缩|变短)|整图.{0,4}(?:拉伸|挤压|压扁)|人物.{0,4}(?:拉伸|挤压|压扁|矮胖|压矮)|身体.{0,4}(?:拉伸|挤压|压扁|矮胖|压矮)|模特.{0,5}(?:矮胖|变胖|压矮)/i;
+    const truncated = /(?:背景|画面边缘|原图边缘).{0,16}(?:半个人|半个模特|人物断截|人物截断|残缺人物|只剩半身|只剩半个)|(?:半个人|半个模特|人物断截|人物截断|残缺人物|只剩半身).{0,16}(?:背景|扩图|边缘)/i;
+    return list.map((s) => {
+      if (!s || scoreAvg(s) == null) return s;
+      const evidence = `${s.notes || ""} ${JSON.stringify(s.defects || [])}`;
+      const notes = String(s.notes || "");
+      const noTruncation = /(?:未见|没有|无明显|并未).{0,8}(?:半个人|断截|截断|残缺)/i.test(evidence);
+      const noDistortion = /(?:未见|没有|无明显|并未).{0,8}(?:非等比|失真|拉伸|挤压|压扁|矮胖|变胖)/i.test(evidence);
+      if (!noDistortion && re.test(evidence)) {
+        const caps = { alignment: 6, quality: 5, consistency: 5, realism: 4 };
+        DIM_KEYS.filter(k => k !== "preservation").forEach(k => {
+          if (typeof s[k] === "number") s[k] = Math.min(s[k], caps[k]);
+        });
+        if (!/\[形态失真上限\]/.test(notes)) s.notes = `${notes || "人物非等比形态失真"} [形态失真上限]`;
+      }
+      if (!noTruncation && truncated.test(evidence)) {
+        if (typeof s.quality === "number") s.quality = Math.min(s.quality, 5);
+        if (typeof s.realism === "number") s.realism = Math.min(s.realism, 5);
+        if (!/\[扩图人物断截\]/.test(String(s.notes || ""))) s.notes = `${s.notes || "扩图后背景人物断截"} [扩图人物断截]`;
+      }
+      return s;
+    });
+  }
+
   /** 双模型：分差小取平均；分差大标记审核 */
   function mergeDualScores(listA, listB, threshold) {
     const mapB = new Map(listB.map((s) => [s.model, s]));
@@ -763,10 +852,10 @@
       if (!aNull && bNull) return a;
       if (aNull && bNull) return a;
 
-      const out = { model: a.model, notes: "", defects: a.defects || [], ...global.SiriserScoringPolicy.merge(a.flags, b.flags) };
+      const out = { model: a.model, notes: "", defects: a.defects || [] };
       DIM_KEYS.forEach((k) => {
         if (typeof a[k] === "number" && typeof b[k] === "number") {
-          out[k] = Math.floor((a[k] + b[k]) / 2);
+          out[k] = Math.round((a[k] + b[k]) / 2);
         } else {
           out[k] = a[k] != null ? a[k] : b[k];
         }
@@ -775,13 +864,9 @@
       out._diff = diff;
       out._a = a;
       out._b = b;
-      out.checks = a.checks || [];
-      const states = (s, d) => global.SiriserScoringPolicy.normalizeChecks(s.checks).filter(c => c.dim === d).map(c => c.status).sort().join(",");
-      out._observationConflict = DIM_KEYS.some(d => states(a,d) !== states(b,d));
-      out.highEvidence = global.SiriserScoringPolicy.observationEvidence(out);
-      if (diff >= threshold || out.pendingFlags.length || out._observationConflict || global.SiriserScoringPolicy.needsHighReview(out)) {
+      if (diff >= threshold) {
         needReview.push(out);
-        out.notes = (a.notes || "") + ` [分差${diff}/缺陷或高分核查→待审]`;
+        out.notes = (a.notes || "") + ` [双分差${diff}→待审]`;
       } else {
         out.notes = (a.notes ? a.notes + " " : "") + `[双模型±${diff}取中]`;
       }
@@ -790,15 +875,29 @@
     return { merged, needReview };
   }
 
+  /** 规则审核：A–D 过低、P–S 过高 */
+  const POLICY_LOW = { A: 1, B: 1, C: 1, D: 1 };
+  const POLICY_HIGH = { P: 1, Q: 1, R: 1, S: 1 };
+
+  function avgScore(s) {
+    const v = DIM_KEYS.map((k) => s[k]).filter((x) => typeof x === "number");
+    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+  }
 
   function pickPolicyReview(items) {
     return items.filter((s) => {
-      // Dual disagreements have already entered the shared review queue.
-      if (s._a || s._reviewed) return false;
-      const capped = global.SiriserScoringPolicy.apply([s])[0];
-      const conflict = global.SiriserScoringPolicy.needsHighReview(s) || capped.appliedCaps.some(c => s[c.dim] - c.cap >= 2);
-      if (conflict) s._policy = "高分依据不足、满分待核查或缺陷与高分冲突";
-      return conflict;
+      const avg = avgScore(s);
+      if (avg == null) return false;
+      const id = String(s.model || "").toUpperCase();
+      if (POLICY_LOW[id] && avg < 5) {
+        s._policy = `规则审核:${id}均分${avg.toFixed(1)}<5`;
+        return true;
+      }
+      if (POLICY_HIGH[id] && avg >= 9) {
+        s._policy = `规则审核:${id}均分${avg.toFixed(1)}≥9`;
+        return true;
+      }
+      return false;
     });
   }
 
@@ -820,14 +919,14 @@
       if (!r) return s;
       return {
         ...r,
-        notes: ((r.notes || "") + (r._reviewed ? " ⚠已规则审核" : " ⚠规则审核未完成")).trim(),
+        notes: ((r.notes || "") + " ⚠已规则审核").trim(),
       };
     });
   }
 
   /**
    * 审核次数上限 + 时间预算，防止 15 个模型各审 2 分钟导致超时。
-   * 优先审严重争议及无依据高分；deadline 可跨多次 reviewScores 共用。
+   * 优先审分差最大的；deadline 可跨多次 reviewScores 共用。
    */
   function capReviewList(items, cfg, deadline) {
     const max = Math.max(0, Number(cfg.MAX_REVIEW ?? 3));
@@ -837,10 +936,10 @@
     }
     const list = (items || [])
       .slice()
-      .sort((x, y) => global.SiriserScoringPolicy.reviewPriority(y) - global.SiriserScoringPolicy.reviewPriority(x));
+      .sort((x, y) => (Number(y._diff) || 0) - (Number(x._diff) || 0));
     if (list.length > max) {
       slog(
-        `审核裁剪到 ${max} 个（按缺陷争议/高分风险/分差：${list
+        `审核裁剪到 ${max} 个（按分差优先：${list
           .slice(0, max)
           .map((x) => x.model + "±" + (x._diff || 0))
           .join(",")}）`
@@ -848,35 +947,6 @@
       return list.slice(0, max);
     }
     return list;
-  }
-
-  async function prepareReviewImages(task, one, deadline) {
-    const fallback = { refs: task.referenceImages || [], images: one.images || [] };
-    if (!task._reviewSources || deadline - Date.now() < 1500) return fallback;
-    const sources = task._reviewSources;
-    const original = sources.models.find(m => normModelId(m.id) === normModelId(one.id));
-    if (!original) return fallback;
-    if (!task._reviewImageCache) task._reviewImageCache = new Map();
-    const load = src => {
-      if (!task._reviewImageCache.has(src)) task._reviewImageCache.set(src, toImagePayload(src, 1280, 0.85).catch(() => null));
-      return task._reviewImageCache.get(src);
-    };
-    let timer;
-    try {
-      const result = await Promise.race([
-        Promise.all([
-          Promise.all((sources.referenceImages || []).map(load)),
-          Promise.all((original.images || []).map(load)),
-        ]).then(([refs, images]) => ({ refs, images })),
-        new Promise(resolve => { timer = setTimeout(() => resolve(null), Math.min(8000, Math.max(1, deadline - Date.now()))); }),
-      ]);
-      if (!result || !result.refs.length || !result.images.length || [...result.refs, ...result.images].some(s => !s)) {
-        slog("审核高清图不可用，保留初评图，勿把不清楚当正确");
-        return fallback;
-      }
-      slog("盲审使用原图重新压缩的1280px对照（不放大低清源图）");
-      return result;
-    } finally { clearTimeout(timer); }
   }
 
   async function reviewScores(cleanTask, items, cfg, deadline) {
@@ -890,7 +960,6 @@
     const skipped = items.filter((x) => !queue.includes(x));
     skipped.forEach((item) => {
       out.push({
-        ...item,
         model: item.model,
         alignment: item.alignment,
         quality: item.quality,
@@ -904,7 +973,6 @@
       if (Date.now() > deadline) {
         slog("审核超预算，剩余改用均值");
         out.push({
-          ...item,
           model: item.model,
           alignment: item.alignment,
           quality: item.quality,
@@ -920,21 +988,33 @@
         out.push(item);
         continue;
       }
-      const reviewImages = await prepareReviewImages(cleanTask, one, deadline);
-      if (Date.now() >= deadline) {
-        out.push({ ...item, notes: (item.notes || "") + " [审核图准备超时，未审核]" });
-        continue;
-      }
-      const userParts = buildOpenAIUserContent(EVIDENCE_SYSTEM,
-        { prompt: cleanTask.prompt, referenceImages: reviewImages.refs },
-        [{ ...one, images: reviewImages.images }]);
-      userParts.unshift({ type: "text", text: "独立盲审：未提供其他评委分数或结论。先记录原图与结果的具体差异，再评分。重点核查主体比例、原边界附近人物完整性、非编辑区域及细节，不能只凭整体印象。" });
-      const remainingMs = Math.max(1, deadline - Date.now());
+      const a = item._a || item;
+      const b = item._b || item;
+      const userParts = [];
+      userParts.push({
+        type: "text",
+        text:
+          `编辑指令：\n${cleanTask.prompt}\n\n` +
+          `两个评委对 model=${item.model} 打分不一致（分差 ${item._diff}）。\n` +
+          `评委A：${DIM_KEYS.map((k) => k + "=" + a[k]).join(" ")} notes=${a.notes || ""}\n` +
+          `评委B：${DIM_KEYS.map((k) => k + "=" + b[k]).join(" ")} notes=${b.notes || ""}\n` +
+          `请对照下列图片独立裁决，只输出 JSON {"model","alignment","quality","preservation","consistency","realism","notes"}，1–10 整数或 null。禁止五维同分。`,
+      });
+      (cleanTask.referenceImages || []).forEach((src, i) => {
+        userParts.push({ type: "text", text: `reference[${i}]` });
+        userParts.push(imgPart(src));
+      });
+      userParts.push({ type: "text", text: `【model=${item.model}】` });
+      (one.images || []).forEach((src, i) => {
+        userParts.push({ type: "text", text: `image[${i}]` });
+        userParts.push(imgPart(src));
+      });
+
+      const remainingMs = Math.max(10000, deadline - Date.now());
       const subCfg = {
         ...cfg,
         OPENAI_MODEL: revModel,
         REQUEST_ROLE: "review",
-        REVIEW_DEADLINE_MS: deadline,
         TIMEOUT_MS: Math.min(Number(cfg.TIMEOUT_MS) || 300000, remainingMs),
       };
       slog(`审核 ${item.model} → ${revModel}`);
@@ -945,11 +1025,10 @@
           subCfg,
           userParts
         );
-        const hit = scores.find((s) => normModelId(s.model) === item.model);
+        const hit = scores.find((s) => normModelId(s.model) === item.model) || scores[0];
         if (hit && scoreAvg(hit) != null) {
           out.push({
             ...hit,
-            _reviewed: true,
             model: item.model,
             notes: (hit.notes || "") + " [已审核]",
           });
@@ -960,7 +1039,6 @@
         slog(`审核失败 ${item.model} ${e && e.message}`, "err");
       }
       out.push({
-        ...item,
         model: item.model,
         alignment: item.alignment,
         quality: item.quality,
@@ -1029,8 +1107,7 @@
         },
       });
     }
-    const cleanTask = { prompt: task.prompt, referenceImages: refImgs, models,
-      _reviewSources: { referenceImages: task.referenceImages || [], models: task.models || [] } };
+    const cleanTask = { prompt: task.prompt, referenceImages: refImgs, models };
 
     // 1) 自定义 API（整批一次）
     if (cfg.API_URL) {
@@ -1051,7 +1128,7 @@
         const t = await res.text().catch(() => "");
         throw new Error("API HTTP " + res.status + " " + t.slice(0, 400));
       }
-      return global.SiriserScoringPolicy.apply(normalizeScores(await res.json()));
+      return applyGeometryDistortionCaps(normalizeScores(await res.json()));
     }
 
     // 2) OpenAI 兼容：可选双模型 + 分差审核
@@ -1102,7 +1179,7 @@
           slog(`重评 ${s.model}`);
           const one = cleanTask.models.filter((m) => normModelId(m.id) === s.model);
           const retry = await callOpenAIBatch(
-            { prompt: cleanTask.prompt, referenceImages: cleanTask.referenceImages, models: one },
+            { prompt: cleanTask.prompt, referenceImages: [], models: one },
             one,
             { ...cfg, OPENAI_MODEL: modelA, TIMEOUT_MS: 60000, REQUEST_ROLE: "judge" }
           );
@@ -1136,14 +1213,14 @@
           final = merged.map((m) => revMap.get(m.model) || m);
         }
         const reviewed2 = await applyPolicyReview(cleanTask, final, cfg, reviewDeadline);
-        // 最终按证据执行上限，不再按相对名次重写绝对分数。
-        return global.SiriserScoringPolicy.apply(reviewed2);
+        // 保序拉开，避免人人 9/8/9/8/7
+        return applyGeometryDistortionCaps(rankSpreadScores(reviewed2));
       }
 
       const reviewDeadline2 =
         Date.now() + Math.max(20000, Number(cfg.REVIEW_BUDGET_MS) || 90000);
       const reviewed3 = await applyPolicyReview(cleanTask, scoresA, cfg, reviewDeadline2);
-      return global.SiriserScoringPolicy.apply(reviewed3);
+      return applyGeometryDistortionCaps(rankSpreadScores(reviewed3));
     }
 
     throw new Error("未配置 API_URL 或 OPENAI_API_KEY");

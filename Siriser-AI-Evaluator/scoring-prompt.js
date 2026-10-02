@@ -142,7 +142,7 @@ window.SCORING_USER_CONSTRAINTS = `本轮标注统一整数分。存在少量模
  */
 window.buildEvalRequest = function buildEvalRequest(task) {
   return {
-    system: `按指令、参考图和生成图评估alignment指令遵循、quality局部质量、preservation非编辑保持、consistency全局一致、realism真实感与美学；五维1–10整数，无图为null。1–3严重失败，4–5明显问题，6–7部分完成，8轻微问题，9–10高度完成。只输出符合response_schema的JSON。\n` + window.SiriserScoringPolicy.prompt,
+    system: window.SCORING_SYSTEM_PROMPT,
     constraints: window.SCORING_USER_CONSTRAINTS,
     prompt: task.prompt || "",
     referenceImages: task.referenceImages || [],
@@ -171,8 +171,6 @@ window.buildEvalRequest = function buildEvalRequest(task) {
               rcr: { type: "number" },
               notes: { type: "string" },
               defects: { type: "array" },
-              checks: { type: "array", maxItems: 12, items: { type: "object", required: ["dim", "expected", "observed", "status"], properties: { dim: { enum: ["alignment", "quality", "preservation", "consistency", "realism"] }, expected: { type: "string" }, observed: { type: "string" }, status: { enum: ["pass", "partial", "fail", "unknown"] } } } },
-              flags: { type: "array", maxItems: 4, items: { type: "object", required: ["code", "severity", "evidence"], properties: { code: { type: "string" }, severity: { enum: ["minor", "major"] }, evidence: { type: "string" } } } },
             },
           },
         },

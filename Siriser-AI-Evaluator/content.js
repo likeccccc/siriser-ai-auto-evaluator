@@ -471,8 +471,8 @@
       return {
         src,
         name,
-        w: Number(img.naturalWidth) || 0,
-        h: Number(img.naturalHeight) || 0,
+        w: img.naturalWidth || img.width || 0,
+        h: img.naturalHeight || img.height || 0,
       };
     }
 
@@ -2655,7 +2655,7 @@
     if (el) el.classList.remove("show");
   }
 
-  // Presentation only: dragging/collapsing must not change submission state.
+  // Presentation only: dragging/collapsing does not affect score submission.
   function bindResultPanelControls(panel) {
     const header = panel.querySelector(".sir-r-h");
     header.title = "拖动标题栏移动窗口";
@@ -2664,47 +2664,39 @@
     let drag = null;
     function place(left, top) {
       const rect = panel.getBoundingClientRect();
-      panel.style.right = "auto";
-      panel.style.bottom = "auto";
+      panel.style.right = "auto"; panel.style.bottom = "auto";
       panel.style.left = Math.max(8, Math.min(left, Math.max(8, window.innerWidth - rect.width - 8))) + "px";
       panel.style.top = Math.max(8, Math.min(top, Math.max(8, window.innerHeight - rect.height - 8))) + "px";
     }
     function clamp() {
       if (!panel.classList.contains("open")) return;
-      const rect = panel.getBoundingClientRect();
-      place(rect.left, rect.top);
+      const r = panel.getBoundingClientRect(); place(r.left, r.top);
     }
     function collapse(value) {
-      const rect = panel.getBoundingClientRect();
+      const r = panel.getBoundingClientRect();
       panel.classList.toggle("collapsed", value);
       toggle.textContent = value ? "展开" : "收起";
       toggle.setAttribute("aria-expanded", String(!value));
       title.textContent = value ? "评分结果" : "评分结果（请核对后提交）";
-      place(rect.left, rect.top);
+      place(r.left, r.top);
     }
     toggle.addEventListener("click", () => collapse(!panel.classList.contains("collapsed")));
     header.addEventListener("pointerdown", e => {
       if (e.button !== 0 || e.isPrimary === false || e.target.closest("button,a,input,select,textarea")) return;
-      const rect = panel.getBoundingClientRect();
-      drag = { id: e.pointerId, x: e.clientX, y: e.clientY, left: rect.left, top: rect.top };
-      header.setPointerCapture(e.pointerId);
-      header.classList.add("dragging");
-      e.preventDefault();
+      const r = panel.getBoundingClientRect();
+      drag = { id: e.pointerId, x: e.clientX, y: e.clientY, left: r.left, top: r.top };
+      header.setPointerCapture(e.pointerId); header.classList.add("dragging"); e.preventDefault();
     });
     header.addEventListener("pointermove", e => {
-      if (!drag || drag.id !== e.pointerId) return;
-      place(drag.left + e.clientX - drag.x, drag.top + e.clientY - drag.y);
+      if (drag && drag.id === e.pointerId) place(drag.left + e.clientX - drag.x, drag.top + e.clientY - drag.y);
     });
     function end(e) {
       if (!drag || drag.id !== e.pointerId) return;
-      drag = null;
-      header.classList.remove("dragging");
+      drag = null; header.classList.remove("dragging");
       if (header.hasPointerCapture(e.pointerId)) header.releasePointerCapture(e.pointerId);
     }
-    header.addEventListener("pointerup", end);
-    header.addEventListener("pointercancel", end);
-    header.addEventListener("lostpointercapture", end);
-    window.addEventListener("resize", clamp);
+    header.addEventListener("pointerup", end); header.addEventListener("pointercancel", end);
+    header.addEventListener("lostpointercapture", end); window.addEventListener("resize", clamp);
     panel._resultControls = { clamp, expand: () => { panel.classList.add("open"); collapse(false); } };
   }
 
@@ -2756,7 +2748,7 @@
             <span class="sir-r-scores">指${fmt(s.alignment)} 局${fmt(s.quality)} 保${fmt(
               s.preservation
             )} 全${fmt(s.consistency)} 真${fmt(s.realism)}</span>
-            <span class="sir-r-note">${escapeHtml([s.notes || "", window.SiriserScoringPolicy.describe(s)].filter(Boolean).join("；"))}</span>
+            <span class="sir-r-note">${escapeHtml(s.notes || "")}</span>
             <span class="sir-r-meta">${
               r.miss.length
                 ? '<span class="err">' + escapeHtml(r.miss.join(", ")) + "</span>"
