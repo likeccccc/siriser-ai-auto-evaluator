@@ -471,8 +471,8 @@
       return {
         src,
         name,
-        w: img.naturalWidth || img.width || 0,
-        h: img.naturalHeight || img.height || 0,
+        w: Number(img.naturalWidth) || 0,
+        h: Number(img.naturalHeight) || 0,
       };
     }
 
@@ -2702,7 +2702,7 @@
             <span class="sir-r-scores">指${fmt(s.alignment)} 局${fmt(s.quality)} 保${fmt(
               s.preservation
             )} 全${fmt(s.consistency)} 真${fmt(s.realism)}</span>
-            <span class="sir-r-note">${escapeHtml(s.notes || "")}</span>
+            <span class="sir-r-note">${escapeHtml([s.notes || "", window.SiriserScoringPolicy.describe(s)].filter(Boolean).join("；"))}</span>
             <span class="sir-r-meta">${
               r.miss.length
                 ? '<span class="err">' + escapeHtml(r.miss.join(", ")) + "</span>"

@@ -241,6 +241,7 @@
       rcr: s.rcr,
       notes: s.notes || "",
       defects: s.defects || [],
+      flags: global.SiriserScoringPolicy.normalize(s.flags),
     }));
   }
 
@@ -363,11 +364,10 @@
         `请只对下列模型打分，输出 JSON {"scores":[...]}\n` +
         `每个模型 5 维 1–10 整数：alignment/quality/preservation/consistency/realism；无图输出 null 且 notes="no_image"。\n` +
         `模型列表：${models.map((m) => m.id).join(", ")}\n\n` +
-        `【强制】不同模型必须给出不同分数向量，禁止复制粘贴同一套分。\n` +
+        `逐张独立按证据打分，同质量允许同分。\n` +
         `【输出比例】先从指令读取目标比例或尺寸（如 1:1、4:3、3:4、16:9、1024×768），再核对每张生成图真实宽高；不符合即为明确指令未完成。\n` +
         `【形态检查】改变画布比例应通过正常裁切、扩图或重构完成；若把原内容非等比拉伸、压扁后硬塞进目标画幅，五维都要扣分。\n` +
-        `每个模型的 notes 必须写出该图特有的一条问题（位置+现象），与其他模型不得相同。\n` +
-        `若两图都挺好，也要通过「哪张更好」拉开至少 1 分差距。` +
+        `每个模型返回flags及简短notes，不强行找问题；本次响应所有模型合计最多4条flags，优先严重缺陷，证据尽量≤20字，避免重复notes。` +
         (task.histHint || ""),
     });
 
@@ -394,37 +394,13 @@
     return sanitizeParts(parts);
   }
 
-  /** 评分用精简 system，降低延迟（细则要点保留） */
-  const SHORT_SYSTEM = `你是 Edit Bench 图片编辑评测专家。对比「编辑指令 + 参考图 + 生成图」给 5 个整数分 1–10：
-alignment 指令遵循, quality 局部质量, preservation 非编辑保持, consistency 全局一致, realism 真实感与美学。
 
-【realism 专条 · 严查 AI 感】只要出现下列任一，realism 最高 7；两项以上或很明显 ≤5：
-- 光照不自然：光影方向矛盾、假高光、塑料反光、过曝/欠曝、色温漂移
-- 过度磨皮/塑料皮肤/蜡像感、皮肤纹理消失、五官柔糊
-- 发丝粘成块、边缘光晕、背景涂抹、细节涂抹感
-- 明显生成伪影：多余手指、文字乱码、结构扭曲、重影、噪点块
-- 整体「一眼 AI」：电影感假、味精色、无真实摄影颗粒
-写实人像/街拍以真实摄影为准；插画/动漫不按照片扣，但仍扣「风格内假光影/糊脸」。
-
-【专家口径】
-- 若指令明确要求输出比例或尺寸，必须按该目标宽高比核对生成图真实尺寸（允许约 3% 编码误差）。轻度偏差 alignment≤7，明显比例错误 alignment≤5；画面好看不能抵消。
-- 输出画布比例正确不代表内容形态正确。改变比例应通过裁切、扩图或重构完成，禁止把整张图/人物/物体非等比拉宽或压扁。
-- 对照参考图检查脸宽、头身比、四肢、服装轮廓、圆形物体与背景透视。明显整体挤压时，notes 必须写“非等比缩放/横向拉宽/纵向压扁”；alignment≤6、quality≤5、preservation≤5、consistency≤5、realism≤4。
-- 左右：写「人物左手/右手」按画中人物自身；只写画面左右按观众视角。Prompt 不清做反只轻扣1分，不算严重不遵循。
-- 配件组合（如衬衫+丝巾）：都出现=好；只做一半=轻扣1–2，不连坐其他四维。
-- 模糊指令对了勿重扣；明确指令做错才按上限重扣。
-- 同题好图与差图必须拉开，禁止同一套高分；好差至少差2分。
-
-其余四维：10 极少；有可见瑕疵最高 8；禁止五维同分；无图五项 null 且 notes="no_image"。
-notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛盾）。
-
-只输出 JSON：
-{"scores":[{"model","alignment","quality","preservation","consistency","realism","notes"}]}`;
+  const EVIDENCE_SYSTEM = `你是图片编辑评测专家，对照指令、参考图与生成图，独立给五维1–10整数分：alignment指令遵循、quality局部质量、preservation非编辑保持、consistency全局一致、realism真实感与美学。1–3严重失败，4–5明显问题，6–7部分完成，8轻微问题，9–10高度完成。按各维实际表现打分，允许五维同分；无图五维null，notes="no_image"，flags=[]。只输出JSON {"scores":[{"model":"A","alignment":8,"quality":8,"preservation":9,"consistency":9,"realism":8,"notes":"简短结论","flags":[]}]}。\n` + global.SiriserScoringPolicy.prompt;
 
   async function callOpenAIBatch(task, models, cfg, userPartsOverride) {
     const base = (cfg.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
     let content = sanitizeParts(
-      userPartsOverride || buildOpenAIUserContent(SHORT_SYSTEM, task, models)
+      userPartsOverride || buildOpenAIUserContent(EVIDENCE_SYSTEM, task, models)
     );
     const modelName = cfg.OPENAI_MODEL || "gpt-4o-mini";
     const baseOutputLimit = Math.max(
@@ -465,7 +441,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       model: modelName,
       temperature: 0.2,
       messages: [
-        { role: "system", content: SHORT_SYSTEM },
+        { role: "system", content: EVIDENCE_SYSTEM },
         { role: "user", content },
       ],
     };
@@ -772,70 +748,6 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     });
   }
 
-  /**
-   * 1) 整题相对排名：把均分映射到 4–9，禁止扎堆 9/10
-   * 保序：原分高的仍高；保留各维相对该模型均分的偏移
-   */
-  function rankSpreadScores(list, lo, hi) {
-    lo = lo == null ? 4 : lo;
-    hi = hi == null ? 9 : hi;
-    const scored = list.filter((s) => scoreAvg(s) != null);
-    if (scored.length < 4) return list;
-
-    const order = scored
-      .slice()
-      .sort((x, y) => scoreAvg(y) - scoreAvg(x));
-    const n = order.length;
-
-    order.forEach((s, i) => {
-      const t = n === 1 ? (lo + hi) / 2 : hi - ((hi - lo) * i) / (n - 1);
-      const oldAvg = scoreAvg(s);
-      DIM_KEYS.forEach((k) => {
-        if (typeof s[k] !== "number") return;
-        const off = s[k] - oldAvg;
-        // 保留维度偏移，略缩放避免又全同
-        let v = t + off * 1.15;
-        s[k] = Math.max(1, Math.min(10, Math.round(v)));
-      });
-      // 五维仍相同则微拆
-      const now = DIM_KEYS.map((k) => s[k]);
-      if (now.every((v) => v === now[0])) {
-        s.quality = Math.max(1, s.quality - 1);
-        s.consistency = Math.max(1, s.consistency - 1);
-      }
-    });
-
-    const avgs = order.map(scoreAvg);
-    slog(
-      `相对排名：n=${n} 首=${avgs[0].toFixed(1)} 尾=${avgs[n - 1].toFixed(1)} 目标区间 ${lo}–${hi}`
-    );
-    return list;
-  }
-
-  /** 相对排名之后再执行，避免明显非等比形变被名次映射重新抬成高分。 */
-  function applyGeometryDistortionCaps(list) {
-    const re = /非等比|比例失真|比例异常|形态失真|横向(?:拉宽|变宽)|纵向(?:压扁|压缩|变短)|整图.{0,4}(?:拉伸|挤压|压扁)|人物.{0,4}(?:拉伸|挤压|压扁)|身体.{0,4}(?:拉伸|挤压|压扁)/i;
-    return list.map((s) => {
-      if (!s || scoreAvg(s) == null) return s;
-      const evidence = `${s.notes || ""} ${JSON.stringify(s.defects || [])}`;
-      if (!re.test(evidence)) return s;
-      const caps = {
-        alignment: 6,
-        quality: 5,
-        preservation: 5,
-        consistency: 5,
-        realism: 4,
-      };
-      DIM_KEYS.forEach((k) => {
-        if (typeof s[k] === "number") s[k] = Math.min(s[k], caps[k]);
-      });
-      if (!/\[形态失真上限\]/.test(String(s.notes || ""))) {
-        s.notes = `${s.notes || "明显非等比形变"} [形态失真上限]`;
-      }
-      return s;
-    });
-  }
-
   /** 双模型：分差小取平均；分差大标记审核 */
   function mergeDualScores(listA, listB, threshold) {
     const mapB = new Map(listB.map((s) => [s.model, s]));
@@ -849,7 +761,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       if (!aNull && bNull) return a;
       if (aNull && bNull) return a;
 
-      const out = { model: a.model, notes: "", defects: a.defects || [] };
+      const out = { model: a.model, notes: "", defects: a.defects || [], ...global.SiriserScoringPolicy.merge(a.flags, b.flags) };
       DIM_KEYS.forEach((k) => {
         if (typeof a[k] === "number" && typeof b[k] === "number") {
           out[k] = Math.round((a[k] + b[k]) / 2);
@@ -861,7 +773,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       out._diff = diff;
       out._a = a;
       out._b = b;
-      if (diff >= threshold) {
+      if (diff >= threshold || out.pendingFlags.length) {
         needReview.push(out);
         out.notes = (a.notes || "") + ` [双分差${diff}→待审]`;
       } else {
@@ -872,29 +784,15 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     return { merged, needReview };
   }
 
-  /** 规则审核：A–D 过低、P–S 过高 */
-  const POLICY_LOW = { A: 1, B: 1, C: 1, D: 1 };
-  const POLICY_HIGH = { P: 1, Q: 1, R: 1, S: 1 };
-
-  function avgScore(s) {
-    const v = DIM_KEYS.map((k) => s[k]).filter((x) => typeof x === "number");
-    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
-  }
 
   function pickPolicyReview(items) {
     return items.filter((s) => {
-      const avg = avgScore(s);
-      if (avg == null) return false;
-      const id = String(s.model || "").toUpperCase();
-      if (POLICY_LOW[id] && avg < 5) {
-        s._policy = `规则审核:${id}均分${avg.toFixed(1)}<5`;
-        return true;
-      }
-      if (POLICY_HIGH[id] && avg >= 9) {
-        s._policy = `规则审核:${id}均分${avg.toFixed(1)}≥9`;
-        return true;
-      }
-      return false;
+      // Dual disagreements have already entered the shared review queue.
+      if (s._a || /\[已审核\]/.test(s.notes || "")) return false;
+      const capped = global.SiriserScoringPolicy.apply([s])[0];
+      const conflict = capped.appliedCaps.some(c => s[c.dim] - c.cap >= 2);
+      if (conflict) s._policy = "缺陷证据与高分冲突";
+      return conflict;
     });
   }
 
@@ -957,6 +855,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     const skipped = items.filter((x) => !queue.includes(x));
     skipped.forEach((item) => {
       out.push({
+        ...item,
         model: item.model,
         alignment: item.alignment,
         quality: item.quality,
@@ -970,6 +869,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       if (Date.now() > deadline) {
         slog("审核超预算，剩余改用均值");
         out.push({
+          ...item,
           model: item.model,
           alignment: item.alignment,
           quality: item.quality,
@@ -992,10 +892,11 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         type: "text",
         text:
           `编辑指令：\n${cleanTask.prompt}\n\n` +
-          `两个评委对 model=${item.model} 打分不一致（分差 ${item._diff}）。\n` +
+          `请复核 model=${item.model} 的评分与缺陷证据（分差 ${item._diff || 0}，${item._policy || "评委结论存在争议"}）。\n` +
           `评委A：${DIM_KEYS.map((k) => k + "=" + a[k]).join(" ")} notes=${a.notes || ""}\n` +
           `评委B：${DIM_KEYS.map((k) => k + "=" + b[k]).join(" ")} notes=${b.notes || ""}\n` +
-          `请对照下列图片独立裁决，只输出 JSON {"model","alignment","quality","preservation","consistency","realism","notes"}，1–10 整数或 null。禁止五维同分。`,
+          `评委A缺陷：${JSON.stringify(a.flags || [])}\n评委B缺陷：${JSON.stringify(b.flags || [])}\n` +
+          `请独立核查争议与证据，仅保留确认的flags，排除不成立项。只输出JSON {"scores":[{"model":"${item.model}","alignment":8,"quality":8,"preservation":8,"consistency":8,"realism":8,"notes":"结论","flags":[]}]}，分数为1–10整数或null，允许同分。`,
       });
       (cleanTask.referenceImages || []).forEach((src, i) => {
         userParts.push({ type: "text", text: `reference[${i}]` });
@@ -1036,6 +937,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         slog(`审核失败 ${item.model} ${e && e.message}`, "err");
       }
       out.push({
+        ...item,
         model: item.model,
         alignment: item.alignment,
         quality: item.quality,
@@ -1125,7 +1027,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         const t = await res.text().catch(() => "");
         throw new Error("API HTTP " + res.status + " " + t.slice(0, 400));
       }
-      return applyGeometryDistortionCaps(normalizeScores(await res.json()));
+      return global.SiriserScoringPolicy.apply(normalizeScores(await res.json()));
     }
 
     // 2) OpenAI 兼容：可选双模型 + 分差审核
@@ -1176,7 +1078,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
           slog(`重评 ${s.model}`);
           const one = cleanTask.models.filter((m) => normModelId(m.id) === s.model);
           const retry = await callOpenAIBatch(
-            { prompt: cleanTask.prompt, referenceImages: [], models: one },
+            { prompt: cleanTask.prompt, referenceImages: cleanTask.referenceImages, models: one },
             one,
             { ...cfg, OPENAI_MODEL: modelA, TIMEOUT_MS: 60000, REQUEST_ROLE: "judge" }
           );
@@ -1210,14 +1112,14 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
           final = merged.map((m) => revMap.get(m.model) || m);
         }
         const reviewed2 = await applyPolicyReview(cleanTask, final, cfg, reviewDeadline);
-        // 保序拉开，避免人人 9/8/9/8/7
-        return applyGeometryDistortionCaps(rankSpreadScores(reviewed2));
+        // 最终按证据执行上限，不再按相对名次重写绝对分数。
+        return global.SiriserScoringPolicy.apply(reviewed2);
       }
 
       const reviewDeadline2 =
         Date.now() + Math.max(20000, Number(cfg.REVIEW_BUDGET_MS) || 90000);
       const reviewed3 = await applyPolicyReview(cleanTask, scoresA, cfg, reviewDeadline2);
-      return applyGeometryDistortionCaps(rankSpreadScores(reviewed3));
+      return global.SiriserScoringPolicy.apply(reviewed3);
     }
 
     throw new Error("未配置 API_URL 或 OPENAI_API_KEY");

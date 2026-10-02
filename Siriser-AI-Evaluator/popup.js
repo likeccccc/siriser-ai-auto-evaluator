@@ -92,7 +92,7 @@ async function ensureContent(tab) {
   // 注入脚本（页面已有 content script 时可能因刷新丢失）
   await chrome.scripting.executeScript({
     target: { tabId: tab.id, allFrames: false },
-    files: ["config.js", "scoring-prompt.js", "api.js", "content.js"],
+    files: ["config.js", "scoring-policy.js", "scoring-prompt.js", "api.js", "content.js"],
   });
   await chrome.scripting.insertCSS({
     target: { tabId: tab.id },
