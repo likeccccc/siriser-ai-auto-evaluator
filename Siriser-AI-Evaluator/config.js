@@ -38,6 +38,13 @@ window.SIRISER_CONFIG = {
   AUTO_SUBMIT: false,
   AUTO_NEXT: false,
   /**
+   * 定时自动停止（仅在自动模式运行时生效）
+   * 到点后不强制打断当前题：先按正常流程打完并提交当前题，再停止、不再领取新题。
+   */
+  AUTO_STOP_ENABLED: false,
+  /** 到点时刻 HH:MM（24 小时制）；到点后打完并提交当前题再停；若已过点则顺延到次日同一时刻 */
+  AUTO_STOP_TIME: "",
+  /**
    * 钉钉自定义机器人 Webhook
    * 例：https://oapi.dingtalk.com/robot/send?access_token=xxxx
    * 异常时 POST 文本消息；留空则不推送

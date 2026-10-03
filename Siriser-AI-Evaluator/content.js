@@ -1598,7 +1598,20 @@
       return false;
     }
     _lastSubmitAt = now;
-    const btn = findTextButton(HEU.submitText || /^(提交并下一题|提交当前题|提交)$/i);
+    // 定时到点：只提交当前题，不点「提交并下一题」再领新题
+    const atStop = _schedStopAt > 0 && Date.now() >= _schedStopAt;
+    let btn = atStop
+      ? findTextButton(/^(提交当前题|提交)$/)
+      : findTextButton(HEU.submitText || /^(提交并下一题|提交当前题|提交)$/i);
+    if (atStop) {
+      if (btn) {
+        log("定时到点：仅提交当前题，不再领取下一题", "ok");
+      } else {
+        // 兜底：宁可领下一题也不能卡住不提交
+        btn = findTextButton(HEU.submitText || /^(提交并下一题|提交当前题|提交)$/i);
+        log("定时到点但未找到「提交当前题」按钮，按原按钮提交", "err");
+      }
+    }
     if (btn) {
       fireClick(btn);
       log("已提交：" + textOf(btn));
@@ -1998,6 +2011,82 @@
     } catch (_) {}
   }
 
+  // ── 定时自动停止：独立 storage key，避免被 saveAutoState 整块覆盖冲掉，且跨刷新保留 ──
+  const SESSION_KEY = "SIRISER_SESSION";
+  function loadSessionDeadline() {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get([SESSION_KEY], (r) => resolve((r && r[SESSION_KEY]) || null));
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+  function saveSessionDeadline(obj) {
+    try {
+      chrome.storage.local.set({ [SESSION_KEY]: obj });
+    } catch (_) {}
+  }
+  function clearSessionDeadline() {
+    try {
+      chrome.storage.local.remove([SESSION_KEY]);
+    } catch (_) {}
+  }
+  /** 定时停止时刻缓存（submitAndNext 需要同步读取） */
+  let _schedStopAt = 0;
+  async function refreshSchedStopAt() {
+    try {
+      const s = await loadSessionDeadline();
+      _schedStopAt = (s && s.endAt) || 0;
+    } catch (_) {
+      _schedStopAt = 0;
+    }
+  }
+  /** 定时到点时先关掉站点「提交后自动领取下一题」勾选，避免提交动作领走下一题 */
+  function tryDisableAutoClaim() {
+    try {
+      const lbl = qa("label, .ant-checkbox-wrapper, [class*=checkbox]")
+        .filter(visible)
+        .find((el) => /领取下一题|自动领取/.test(textOf(el) || ""));
+      if (!lbl) return false;
+      const inp =
+        lbl.querySelector?.('input[type="checkbox"]') ||
+        (lbl.tagName === "INPUT" ? lbl : null);
+      if (inp && !inp.checked) return true;
+      fireClick(lbl);
+      log("定时到点：已取消「提交后自动领取下一题」");
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+  /** 自动流程专用提交：到点则先关自动领取，再只提交当前题 */
+  async function submitAutoForDeadline() {
+    await refreshSchedStopAt();
+    if (_schedStopAt > 0 && Date.now() >= _schedStopAt) {
+      log("定时已到点：本题提交后停止，不领取下一题", "ok");
+      tryDisableAutoClaim();
+      await sleep(400); // 等站点把按钮文案从「提交并下一题」刷回「提交当前题」
+    }
+    return submitAndNext();
+  }
+  /** 依据配置算出本次会话的绝对停止时刻(ms)：到点 AUTO_STOP_TIME(HH:MM)，已过点顺延次日；未启用/无效返回 null */
+  function computeSessionEndAt(cfg) {
+    if (!cfg || !cfg.AUTO_STOP_ENABLED) return null;
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(cfg.AUTO_STOP_TIME || "").trim());
+    if (!m) return null;
+    const hh = Math.min(23, Math.max(0, Number(m[1])));
+    const mm = Math.min(59, Math.max(0, Number(m[2])));
+    const d = new Date();
+    d.setHours(hh, mm, 0, 0);
+    let endAt = d.getTime();
+    if (endAt <= Date.now()) endAt += 24 * 3600 * 1000; // 已过点 → 顺延到次日同一时刻
+    return endAt;
+  }
+  function stopLabelFor(cfg) {
+    return "到点 " + ((cfg && cfg.AUTO_STOP_TIME) || "") + " 停";
+  }
+
   function missingScoreIds(scores) {
     return (scores || [])
       .filter((s) => {
@@ -2118,7 +2207,7 @@
     }
   }
 
-  async function notifyDingTalk(text) {
+  async function notifyDingTalk(text, prefix) {
     try {
       await loadConfigFromStorage();
       const hook = String((CFG && CFG.DINGTALK_WEBHOOK) || "").trim();
@@ -2127,7 +2216,8 @@
         return false;
       }
       const body =
-        "【Siriser 标注异常】\n" +
+        (prefix || "【Siriser 标注异常】") +
+        "\n" +
         text.slice(0, 800) +
         "\n页面：" +
         location.href.slice(0, 120) +
@@ -2170,12 +2260,31 @@
     }
   }
 
+  /** 定时到点正常停止 → 中性标题钉钉推送（非异常） */
+  async function notifyScheduledStop(sess) {
+    const label = (sess && sess.label) || "定时停止";
+    const endStr = sess && sess.endAt ? new Date(sess.endAt).toLocaleString() : "";
+    const text =
+      "定时自动停止已触发（" +
+      label +
+      (endStr ? "，计划 " + endStr : "") +
+      "）。当前题已按正常流程处理，自动模式已停止，不再领取新题。";
+    try {
+      return await notifyDingTalk(text, "【Siriser 定时停止】");
+    } catch (e) {
+      log("定时停止推送失败：" + (e && e.message), "err");
+      return false;
+    }
+  }
+
   async function stopAuto(reason, opts) {
     const silent = !!(opts && opts.silent);
     _autoGen += 1;
     _autoRunning = false;
     _cancelSubmit = false;
     saveAutoState({ on: false, phase: "off", submitAt: null, reason: reason || "stopped", at: Date.now() });
+    clearSessionDeadline();
+    _schedStopAt = 0;
     log("全自动停止：" + (reason || ""));
     // 用户手动关不推送；异常停止才推钉钉（必须 await）
     if (!silent) {
@@ -2419,7 +2528,7 @@
       taskKey: null,
       batchSize: Number(CFG.AUTO_BATCH) || 3,
     });
-    const ok = submitAndNext();
+    const ok = await submitAutoForDeadline();
     clearCountdownInPanel();
     // 未跳转则继续等 2s 跑下一题；已跳转则由加载页续跑
     saveAutoState({
@@ -2465,6 +2574,7 @@
     const batchSize = Number(st.batchSize) || 3;
     CFG.AUTO_BATCH = batchSize;
     log("自动循环启动 batch=" + batchSize + " gen=" + myGen);
+    await refreshSchedStopAt();
 
     while (_autoRunning && _autoGen === myGen) {
       const st2 = await loadAutoState();
@@ -2492,7 +2602,7 @@
             clearCountdownInPanel();
             if (!_cancelSubmit && _autoGen === myGen) {
               updateCountdownInPanel("正在提交…", true);
-              submitAndNext();
+              await submitAutoForDeadline();
             } else {
               log("倒计时已取消/作废，不提交");
             }
@@ -2504,6 +2614,20 @@
           // 过期或不是本题 → 作废
           log("旧倒计时作废（已过期或非本题），重新评分");
           saveAutoState({ on: true, phase: "idle", submitAt: null, taskKey: null });
+        }
+
+        // 定时自动停止：只在「准备开始一道新题」的边界判定，
+        // 因此正在进行的题会先正常打完/提交，到点也不打断它 → 打完当前题再停。
+        const sess = await loadSessionDeadline();
+        if (sess && sess.endAt && Date.now() >= sess.endAt) {
+          log("定时已到（" + (sess.label || "") + "），打完当前题后停止自动", "ok");
+          clearSessionDeadline();
+          await stopAuto("定时自动停止：" + (sess.label || ""), { silent: true });
+          toastMsg("定时到点，已停止自动（当前题已提交）");
+          try {
+            await notifyScheduledStop(sess);
+          } catch (_) {}
+          break;
         }
 
         const ok = await autoOneTask(myGen);
@@ -2537,6 +2661,7 @@
     });
     if (!on) {
       _autoRunning = false;
+      clearSessionDeadline();
     }
     log(on ? "自动模式=开（未启动，待点逐张/3张评）" : "自动模式=关");
   }
@@ -2558,7 +2683,30 @@
     });
     setAutoSwitchUI(true);
     _autoRunning = false; // allow loop
-    toastMsg(`自动已启动（${batchSize || prev.batchSize || 3}张/批 · 倒计时后提交）`);
+
+    // 定时自动停止：按当前配置算出本次会话绝对停止时刻并持久化（跨刷新保留）
+    let timerNote = "";
+    try {
+      await loadConfigFromStorage();
+      const endAt = computeSessionEndAt(CFG);
+      if (endAt) {
+        saveSessionDeadline({
+          endAt,
+          mode: "clock",
+          label: stopLabelFor(CFG),
+          setAt: Date.now(),
+        });
+        const leftH = (endAt - Date.now()) / 3600000;
+        timerNote = ` · 定时：${stopLabelFor(CFG)}（约剩 ${leftH.toFixed(1)} 小时，到点打完当前题再停）`;
+        log("定时停止已设定 " + stopLabelFor(CFG) + " → " + new Date(endAt).toLocaleString(), "ok");
+      } else {
+        clearSessionDeadline();
+      }
+    } catch (e) {
+      log("设定定时停止失败(忽略)：" + (e && e.message), "err");
+    }
+
+    toastMsg(`自动已启动（${batchSize || prev.batchSize || 3}张/批 · 倒计时后提交）${timerNote}`);
     log("启动自动循环 batch=" + (batchSize || prev.batchSize || 3), "ok");
     autoLoop();
   }

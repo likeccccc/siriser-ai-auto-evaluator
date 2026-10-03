@@ -36,21 +36,74 @@ async function fetchBlob(url) {
   return res.blob();
 }
 
-chrome.runtime.onInstalled.addListener(function () {
-  chrome.storage.sync.get(["SIRISER_CONFIG"], function (res) {
-    if (!res || !res.SIRISER_CONFIG) {
-      chrome.storage.sync.set({
-        SIRISER_CONFIG: {
-          API_URL: "",
-          API_KEY: "",
-          OPENAI_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-          OPENAI_MODEL: "qwen-vl-max",
-          OPENAI_API_KEY: "",
-          AUTO_SUBMIT: false,
-          AUTO_NEXT: false,
-        },
-      });
-    }
+/** 各版本更新说明（键=版本号，值=多行文本），版本升级时随钉钉公告推送 */
+const VERSION_NOTES = {
+  "1.0.28": "新增「定时自动停止」：到点先打完并提交当前题再停，可走钉钉推送。",
+  "1.0.29": "定时停止精简为仅「到点时刻」一种（去掉按运行时长）；新增版本更新自动钉钉公告。",
+  "1.0.30": "① 定时自动停止：到点先打完并提交当前题再停、不再领新题，到点走钉钉通知；② 版本更新自动钉钉公告：升级到新版本时自动推送「版本+更新内容」，同版本不重复；③ 修复钉钉推送中文乱码：请求头补 charset=utf-8（三处发送均已修正）。",
+};
+const LAST_VER_KEY = "SIRISER_LAST_NOTIFIED_VER";
+
+function postDingText(webhook, content) {
+  return fetch(webhook, {
+    method: "POST",
+    headers: { "Content-Type": "application/json;charset=utf-8" },
+    body: JSON.stringify({ msgtype: "text", text: { content: String(content || "") } }),
+  })
+    .then(function (r) { return !!r.ok; })
+    .catch(function () { return false; });
+}
+
+chrome.runtime.onInstalled.addListener(function (details) {
+  const cur = chrome.runtime.getManifest().version;
+  const write = function (v) { const p = {}; p[LAST_VER_KEY] = v; chrome.storage.local.set(p); };
+
+  // 首次安装：补默认配置
+  if (details && details.reason === "install") {
+    chrome.storage.sync.get(["SIRISER_CONFIG"], function (res) {
+      if (!res || !res.SIRISER_CONFIG) {
+        chrome.storage.sync.set({
+          SIRISER_CONFIG: {
+            API_URL: "",
+            API_KEY: "",
+            OPENAI_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            OPENAI_MODEL: "qwen-vl-max",
+            OPENAI_API_KEY: "",
+            AUTO_SUBMIT: false,
+            AUTO_NEXT: false,
+          },
+        });
+      }
+    });
+  }
+
+  // 仅「升级到新版本」且未就该版本通知过时，往已配置的钉钉 Webhook 推一条版本公告；
+  // 安装/同版本重载只记录不推送，避免打扰。
+  if (!details || details.reason !== "update") {
+    write(cur);
+    return;
+  }
+  chrome.storage.local.get([LAST_VER_KEY], function (r) {
+    const last = r && r[LAST_VER_KEY];
+    if (last === cur) return; // 同版本已通知过
+    const notes = VERSION_NOTES[cur] || "（本版本无更新说明，详见 README）";
+    const body =
+      "【Siriser 扩展更新】\n" +
+      "版本：" +
+      (last ? last + " → " : "") +
+      cur +
+      "\n更新内容：\n" +
+      notes +
+      "\n时间：" +
+      new Date().toLocaleString();
+    chrome.storage.sync.get(["SIRISER_CONFIG"], function (cfg) {
+      const hook = (((cfg || {}).SIRISER_CONFIG || {}).DINGTALK_WEBHOOK || "").trim();
+      if (!hook) {
+        write(cur);
+        return;
+      }
+      postDingText(hook, body).then(function () { write(cur); });
+    });
   });
 });
 
@@ -68,7 +121,7 @@ chrome.runtime.onMessage.addListener(function (msg, _sender, sendResponse) {
       try {
         const res = await fetch(msg.webhook, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json;charset=utf-8" },
           body: JSON.stringify({
             msgtype: "text",
             text: { content: String(msg.text || "") },
