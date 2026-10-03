@@ -1,5 +1,12 @@
 # AI 交接文档 — Siriser 自动评分 Chrome 扩展
 
+### 1.0.31 修复定时到点仍领取下一题
+
+- 问题：到点停止的判定在 autoLoop 循环顶部（开新题前），但上一题结束时 submitAndNext 会点「提交并下一题」，在平台侧领走新题后才停。
+- 修复：新增 `_schedStopAt` 缓存 + `refreshSchedStopAt()`；自动流程改走 `submitAutoForDeadline()`——到点先 `tryDisableAutoClaim()` 取消站点「提交后自动领取下一题」勾选（等 400ms 让按钮文案刷新），再只匹配 `^(提交当前题|提交)$` 提交；找不到该按钮时兜底按原按钮提交（宁可领下一题也不卡住不提交）。
+- 手动提交入口（悬浮球/popup）同步生效：submitAndNext 内同步检查 `_schedStopAt`；stopAuto 时清零缓存。
+- 回归：`node --check` 全部通过；`node --test tests/result-panel.test.cjs` 4/4。
+
 ### 1.0.27 基于 1.0.23 评分逻辑的保留修复
 
 - 评分 API 与提示词已回到 1.0.23；移除了 1.0.24–1.0.27 引入的结构化证据闸门、盲审和高分核查改造。

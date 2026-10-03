@@ -1598,7 +1598,20 @@
       return false;
     }
     _lastSubmitAt = now;
-    const btn = findTextButton(HEU.submitText || /^(提交并下一题|提交当前题|提交)$/i);
+    // 定时到点：只提交当前题，不点「提交并下一题」再领新题
+    const atStop = _schedStopAt > 0 && Date.now() >= _schedStopAt;
+    let btn = atStop
+      ? findTextButton(/^(提交当前题|提交)$/)
+      : findTextButton(HEU.submitText || /^(提交并下一题|提交当前题|提交)$/i);
+    if (atStop) {
+      if (btn) {
+        log("定时到点：仅提交当前题，不再领取下一题", "ok");
+      } else {
+        // 兜底：宁可领下一题也不能卡住不提交
+        btn = findTextButton(HEU.submitText || /^(提交并下一题|提交当前题|提交)$/i);
+        log("定时到点但未找到「提交当前题」按钮，按原按钮提交", "err");
+      }
+    }
     if (btn) {
       fireClick(btn);
       log("已提交：" + textOf(btn));
@@ -2019,6 +2032,44 @@
       chrome.storage.local.remove([SESSION_KEY]);
     } catch (_) {}
   }
+  /** 定时停止时刻缓存（submitAndNext 需要同步读取） */
+  let _schedStopAt = 0;
+  async function refreshSchedStopAt() {
+    try {
+      const s = await loadSessionDeadline();
+      _schedStopAt = (s && s.endAt) || 0;
+    } catch (_) {
+      _schedStopAt = 0;
+    }
+  }
+  /** 定时到点时先关掉站点「提交后自动领取下一题」勾选，避免提交动作领走下一题 */
+  function tryDisableAutoClaim() {
+    try {
+      const lbl = qa("label, .ant-checkbox-wrapper, [class*=checkbox]")
+        .filter(visible)
+        .find((el) => /领取下一题|自动领取/.test(textOf(el) || ""));
+      if (!lbl) return false;
+      const inp =
+        lbl.querySelector?.('input[type="checkbox"]') ||
+        (lbl.tagName === "INPUT" ? lbl : null);
+      if (inp && !inp.checked) return true;
+      fireClick(lbl);
+      log("定时到点：已取消「提交后自动领取下一题」");
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+  /** 自动流程专用提交：到点则先关自动领取，再只提交当前题 */
+  async function submitAutoForDeadline() {
+    await refreshSchedStopAt();
+    if (_schedStopAt > 0 && Date.now() >= _schedStopAt) {
+      log("定时已到点：本题提交后停止，不领取下一题", "ok");
+      tryDisableAutoClaim();
+      await sleep(400); // 等站点把按钮文案从「提交并下一题」刷回「提交当前题」
+    }
+    return submitAndNext();
+  }
   /** 依据配置算出本次会话的绝对停止时刻(ms)：到点 AUTO_STOP_TIME(HH:MM)，已过点顺延次日；未启用/无效返回 null */
   function computeSessionEndAt(cfg) {
     if (!cfg || !cfg.AUTO_STOP_ENABLED) return null;
@@ -2233,6 +2284,7 @@
     _cancelSubmit = false;
     saveAutoState({ on: false, phase: "off", submitAt: null, reason: reason || "stopped", at: Date.now() });
     clearSessionDeadline();
+    _schedStopAt = 0;
     log("全自动停止：" + (reason || ""));
     // 用户手动关不推送；异常停止才推钉钉（必须 await）
     if (!silent) {
@@ -2476,7 +2528,7 @@
       taskKey: null,
       batchSize: Number(CFG.AUTO_BATCH) || 3,
     });
-    const ok = submitAndNext();
+    const ok = await submitAutoForDeadline();
     clearCountdownInPanel();
     // 未跳转则继续等 2s 跑下一题；已跳转则由加载页续跑
     saveAutoState({
@@ -2522,6 +2574,7 @@
     const batchSize = Number(st.batchSize) || 3;
     CFG.AUTO_BATCH = batchSize;
     log("自动循环启动 batch=" + batchSize + " gen=" + myGen);
+    await refreshSchedStopAt();
 
     while (_autoRunning && _autoGen === myGen) {
       const st2 = await loadAutoState();
@@ -2549,7 +2602,7 @@
             clearCountdownInPanel();
             if (!_cancelSubmit && _autoGen === myGen) {
               updateCountdownInPanel("正在提交…", true);
-              submitAndNext();
+              await submitAutoForDeadline();
             } else {
               log("倒计时已取消/作废，不提交");
             }
