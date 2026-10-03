@@ -1598,7 +1598,20 @@
       return false;
     }
     _lastSubmitAt = now;
-    const btn = findTextButton(HEU.submitText || /^(提交并下一题|提交当前题|提交)$/i);
+    // 定时到点：只提交当前题，不点「提交并下一题」再领新题
+    const atStop = _schedStopAt > 0 && Date.now() >= _schedStopAt;
+    let btn = atStop
+      ? findTextButton(/^(提交当前题|提交)$/)
+      : findTextButton(HEU.submitText || /^(提交并下一题|提交当前题|提交)$/i);
+    if (atStop) {
+      if (btn) {
+        log("定时到点：仅提交当前题，不再领取下一题", "ok");
+      } else {
+        // 安全优先：绝不能回退点击「提交并下一题」，留给人工处理当前题。
+        log("定时到点但未找到安全提交按钮，为避免领取下一题，本题留待人工提交", "err");
+        return false;
+      }
+    }
     if (btn) {
       fireClick(btn);
       log("已提交：" + textOf(btn));
@@ -1678,6 +1691,132 @@
   const IMAGE_RECHECK_WAIT_MS = 12000;
   let _lastImageAlertKey = "";
 
+  function normalizeWorkbenchCellText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function findActiveWorkbenchPackageId(headers, rows) {
+    const normalizedHeaders = (headers || []).map(normalizeWorkbenchCellText);
+    const idIndex = normalizedHeaders.findIndex((h) => /题目\s*ID/i.test(h));
+    const statusIndex = normalizedHeaders.findIndex((h) => /题目状态|状态/.test(h));
+    const actionIndex = normalizedHeaders.findIndex((h) => /操作/.test(h));
+    if (idIndex < 0 || statusIndex < 0 || actionIndex < 0) {
+      return { ok: false, error: "工作台项目表未找到「题目状态 / 题目ID / 操作」列" };
+    }
+    const activeCandidates = (rows || []).map((row) => {
+      const cells = (row || []).map(normalizeWorkbenchCellText);
+      return {
+        id: normalizeWorkbenchCellText((row || [])[idIndex]),
+        status: cells[statusIndex] || "",
+        actions: cells[actionIndex] || "",
+      };
+    }).filter((candidate) => /进行中/.test(candidate.status) && candidate.id && candidate.id !== "-");
+    // 「进行中」是任务包已锁定的主状态。操作文案会随页面版本/权限变化；
+    // 有多个进行中任务时才用「回答 + 释放」操作组合进一步消歧。
+    const actionable = activeCandidates.filter((candidate) => /回答|答题|作答/.test(candidate.actions) && /释放/.test(candidate.actions));
+    const selected = actionable.length === 1 ? actionable : activeCandidates.length === 1 ? activeCandidates : [];
+    const ids = selected.map((candidate) => candidate.id);
+    if (ids.length !== 1) {
+      return {
+        ok: false,
+        error: ids.length
+          ? `工作台有 ${ids.length} 个候选进行中任务包，无法安全确定目标`
+          : activeCandidates.length > 1
+            ? `工作台有 ${activeCandidates.length} 个进行中任务包，且操作列文案不足以安全区分`
+            : "工作台没有找到唯一的「进行中」任务包题目 ID",
+      };
+    }
+    return { ok: true, taskId: ids[0] };
+  }
+
+  function readActiveWorkbenchPackageId(doc) {
+    doc = doc || document;
+    const wrappers = Array.from(doc.querySelectorAll(".ant-table-wrapper"));
+    const scopes = wrappers.length ? wrappers : [doc];
+    const readHeaders = (table) => {
+      const row = table.querySelector("thead tr");
+      return row ? Array.from(row.querySelectorAll("th,td")).map((cell) => normalizeWorkbenchCellText(cell.innerText || cell.textContent)) : [];
+    };
+    const readRows = (table) => Array.from(table.querySelectorAll("tbody tr"));
+    const readRowValues = (row) => Array.from(row.querySelectorAll("td")).map((cell) => normalizeWorkbenchCellText(cell.innerText || cell.textContent));
+    const readActionText = (row) => {
+      const cells = Array.from(row.querySelectorAll("td"));
+      const cell = cells[cells.length - 1];
+      if (!cell) return "";
+      const labels = Array.from(cell.querySelectorAll("button,a,[role=button]"))
+        .map((el) => [el.innerText, el.textContent, el.getAttribute("aria-label"), el.getAttribute("title")].filter(Boolean).join(" "));
+      return `${cell.innerText || cell.textContent || ""} ${labels.join(" ")}`;
+    };
+
+    for (const scope of scopes) {
+      const tables = Array.from(scope.querySelectorAll("table"));
+      const parts = tables.map((table) => ({ table, headers: readHeaders(table), rows: readRows(table) }));
+      const questionPart = parts.find((part) => part.headers.some((h) => /题目\s*ID/i.test(h)));
+      if (!questionPart) continue;
+      const actionPart = parts.find((part) => part.headers.some((h) => /操作/.test(h)));
+      const questionHeaders = questionPart.headers;
+      const idIndex = questionHeaders.findIndex((h) => /题目\s*ID/i.test(h));
+      const statusIndex = questionHeaders.findIndex((h) => /题目状态|状态/.test(h));
+      const inlineActionIndex = questionHeaders.findIndex((h) => /操作/.test(h));
+      if (idIndex < 0 || statusIndex < 0 || (!actionPart && inlineActionIndex < 0)) {
+        return { ok: false, error: "工作台找到题目 ID 表头，但状态列或操作列在单独的固定列中，无法配对" };
+      }
+
+      const chooseRows = (part, excludedTable) => {
+        if (part && part.rows.length) return part.rows;
+        const width = (part && part.headers.length) || 0;
+        const candidates = parts.filter((candidate) => candidate.table !== excludedTable && candidate.rows.length)
+          .map((candidate) => ({ rows: candidate.rows, widthDiff: Math.abs(candidate.rows[0].querySelectorAll("td").length - width) }))
+          .sort((a, b) => a.widthDiff - b.widthDiff);
+        return candidates.length && candidates[0].widthDiff <= 1 ? candidates[0].rows : [];
+      };
+      const questionRows = chooseRows(questionPart);
+      const actionRows = inlineActionIndex >= 0 ? questionRows : chooseRows(actionPart, questionPart.table);
+      if (!questionRows.length || !actionRows.length) {
+        return { ok: false, error: "工作台已找到列标题，但题目数据行没有加载或固定操作列无法配对" };
+      }
+      const headers = questionHeaders.slice();
+      const actionIndex = inlineActionIndex >= 0 ? inlineActionIndex : headers.push("操作") - 1;
+      const rows = questionRows.map((row, index) => {
+        const values = readRowValues(row);
+        if (inlineActionIndex >= 0) {
+          values[inlineActionIndex] = `${values[inlineActionIndex] || ""} ${readActionText(row)}`;
+        } else if (actionRows[index]) {
+          values[actionIndex] = readActionText(actionRows[index]);
+        }
+        return values;
+      });
+      return findActiveWorkbenchPackageId(headers, rows);
+    }
+    return { ok: false, error: `工作台表格结构未匹配（检测到 ${doc.querySelectorAll("table").length} 个 table），未能配对题目 ID 与操作列` };
+  }
+
+  /** 图片复查仍失败时，从工作台当前已锁定任务包读取题目 ID 并推送。 */
+  async function notifyImageIssueTaskId() {
+    try {
+      await loadConfigFromStorage();
+      const hook = String((CFG && CFG.DINGTALK_WEBHOOK) || "").trim();
+      if (!hook || !/^https?:\/\//i.test(hook)) {
+        log("未配置钉钉 Webhook，跳过分包 ID 推送", "err");
+        return false;
+      }
+      const res = await sendRuntimeMsg({
+        type: "SIRISER_GET_WORKBENCH_PACKAGE_ID",
+        webhook: hook,
+        activateWorkbench: true,
+      });
+      if (!res || !res.ok) {
+        log(`工作台分包 ID 获取/推送失败：${(res && res.error) || (res && res.body) || "后台无响应"}`, "err");
+        return false;
+      }
+      log(`工作台题目 ID ${res.taskId} 已发送到钉钉`, "ok");
+      return true;
+    } catch (e) {
+      log("分包 ID 钉钉推送失败：" + (e && e.message), "err");
+      return false;
+    }
+  }
+
   function taskImageIssues(task) {
     return ((task && task._cards) || []).filter(
       (m) => m && (m.broken || !(m.images && m.images.length))
@@ -1750,10 +1889,7 @@
     const alertKey = `${location.href}|${String(task.prompt || "").slice(0, 80)}`;
     if (_lastImageAlertKey !== alertKey) {
       _lastImageAlertKey = alertKey;
-      await notifyAbnormal(
-        "图片缺失/加载异常",
-        `等待 ${fmtDur(IMAGE_RECHECK_WAIT_MS)} 并重新检测后仍异常：${detail}。对应模型五维将勾“无”。`
-      );
+      await notifyImageIssueTaskId();
     }
     return task;
   }
@@ -1998,6 +2134,82 @@
     } catch (_) {}
   }
 
+  // ── 定时自动停止：独立 storage key，避免被 saveAutoState 整块覆盖冲掉，且跨刷新保留 ──
+  const SESSION_KEY = "SIRISER_SESSION";
+  function loadSessionDeadline() {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get([SESSION_KEY], (r) => resolve((r && r[SESSION_KEY]) || null));
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+  function saveSessionDeadline(obj) {
+    try {
+      chrome.storage.local.set({ [SESSION_KEY]: obj });
+    } catch (_) {}
+  }
+  function clearSessionDeadline() {
+    try {
+      chrome.storage.local.remove([SESSION_KEY]);
+    } catch (_) {}
+  }
+  /** 定时停止时刻缓存（submitAndNext 需要同步读取） */
+  let _schedStopAt = 0;
+  async function refreshSchedStopAt() {
+    try {
+      const s = await loadSessionDeadline();
+      _schedStopAt = (s && s.endAt) || 0;
+    } catch (_) {
+      _schedStopAt = 0;
+    }
+  }
+  /** 定时到点时先关掉站点「提交后自动领取下一题」勾选，避免提交动作领走下一题 */
+  function tryDisableAutoClaim() {
+    try {
+      const lbl = qa("label, .ant-checkbox-wrapper, [class*=checkbox]")
+        .filter(visible)
+        .find((el) => /领取下一题|自动领取/.test(textOf(el) || ""));
+      if (!lbl) return false;
+      const inp =
+        lbl.querySelector?.('input[type="checkbox"]') ||
+        (lbl.tagName === "INPUT" ? lbl : null);
+      if (inp && !inp.checked) return true;
+      fireClick(lbl);
+      log("定时到点：已取消「提交后自动领取下一题」");
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+  /** 自动流程专用提交：到点则先关自动领取，再只提交当前题 */
+  async function submitAutoForDeadline() {
+    await refreshSchedStopAt();
+    if (_schedStopAt > 0 && Date.now() >= _schedStopAt) {
+      log("定时已到点：本题提交后停止，不领取下一题", "ok");
+      tryDisableAutoClaim();
+      await sleep(400); // 等站点把按钮文案从「提交并下一题」刷回「提交当前题」
+    }
+    return submitAndNext();
+  }
+  /** 依据配置算出本次会话的绝对停止时刻(ms)：到点 AUTO_STOP_TIME(HH:MM)，已过点顺延次日；未启用/无效返回 null */
+  function computeSessionEndAt(cfg) {
+    if (!cfg || !cfg.AUTO_STOP_ENABLED) return null;
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(cfg.AUTO_STOP_TIME || "").trim());
+    if (!m) return null;
+    const hh = Math.min(23, Math.max(0, Number(m[1])));
+    const mm = Math.min(59, Math.max(0, Number(m[2])));
+    const d = new Date();
+    d.setHours(hh, mm, 0, 0);
+    let endAt = d.getTime();
+    if (endAt <= Date.now()) endAt += 24 * 3600 * 1000; // 已过点 → 顺延到次日同一时刻
+    return endAt;
+  }
+  function stopLabelFor(cfg) {
+    return "到点 " + ((cfg && cfg.AUTO_STOP_TIME) || "") + " 停";
+  }
+
   function missingScoreIds(scores) {
     return (scores || [])
       .filter((s) => {
@@ -2118,7 +2330,7 @@
     }
   }
 
-  async function notifyDingTalk(text) {
+  async function notifyDingTalk(text, prefix) {
     try {
       await loadConfigFromStorage();
       const hook = String((CFG && CFG.DINGTALK_WEBHOOK) || "").trim();
@@ -2127,7 +2339,8 @@
         return false;
       }
       const body =
-        "【Siriser 标注异常】\n" +
+        (prefix || "【Siriser 标注异常】") +
+        "\n" +
         text.slice(0, 800) +
         "\n页面：" +
         location.href.slice(0, 120) +
@@ -2170,12 +2383,31 @@
     }
   }
 
+  /** 定时到点正常停止 → 中性标题钉钉推送（非异常） */
+  async function notifyScheduledStop(sess) {
+    const label = (sess && sess.label) || "定时停止";
+    const endStr = sess && sess.endAt ? new Date(sess.endAt).toLocaleString() : "";
+    const text =
+      "定时自动停止已触发（" +
+      label +
+      (endStr ? "，计划 " + endStr : "") +
+      "）。当前题已按正常流程处理，自动模式已停止，不再领取新题。";
+    try {
+      return await notifyDingTalk(text, "【Siriser 定时停止】");
+    } catch (e) {
+      log("定时停止推送失败：" + (e && e.message), "err");
+      return false;
+    }
+  }
+
   async function stopAuto(reason, opts) {
     const silent = !!(opts && opts.silent);
     _autoGen += 1;
     _autoRunning = false;
     _cancelSubmit = false;
     saveAutoState({ on: false, phase: "off", submitAt: null, reason: reason || "stopped", at: Date.now() });
+    clearSessionDeadline();
+    _schedStopAt = 0;
     log("全自动停止：" + (reason || ""));
     // 用户手动关不推送；异常停止才推钉钉（必须 await）
     if (!silent) {
@@ -2419,7 +2651,7 @@
       taskKey: null,
       batchSize: Number(CFG.AUTO_BATCH) || 3,
     });
-    const ok = submitAndNext();
+    const ok = await submitAutoForDeadline();
     clearCountdownInPanel();
     // 未跳转则继续等 2s 跑下一题；已跳转则由加载页续跑
     saveAutoState({
@@ -2465,6 +2697,7 @@
     const batchSize = Number(st.batchSize) || 3;
     CFG.AUTO_BATCH = batchSize;
     log("自动循环启动 batch=" + batchSize + " gen=" + myGen);
+    await refreshSchedStopAt();
 
     while (_autoRunning && _autoGen === myGen) {
       const st2 = await loadAutoState();
@@ -2492,7 +2725,7 @@
             clearCountdownInPanel();
             if (!_cancelSubmit && _autoGen === myGen) {
               updateCountdownInPanel("正在提交…", true);
-              submitAndNext();
+              await submitAutoForDeadline();
             } else {
               log("倒计时已取消/作废，不提交");
             }
@@ -2504,6 +2737,20 @@
           // 过期或不是本题 → 作废
           log("旧倒计时作废（已过期或非本题），重新评分");
           saveAutoState({ on: true, phase: "idle", submitAt: null, taskKey: null });
+        }
+
+        // 定时自动停止：只在「准备开始一道新题」的边界判定，
+        // 因此正在进行的题会先正常打完/提交，到点也不打断它 → 打完当前题再停。
+        const sess = await loadSessionDeadline();
+        if (sess && sess.endAt && Date.now() >= sess.endAt) {
+          log("定时已到（" + (sess.label || "") + "），打完当前题后停止自动", "ok");
+          clearSessionDeadline();
+          await stopAuto("定时自动停止：" + (sess.label || ""), { silent: true });
+          toastMsg("定时到点，已停止自动（当前题已提交）");
+          try {
+            await notifyScheduledStop(sess);
+          } catch (_) {}
+          break;
         }
 
         const ok = await autoOneTask(myGen);
@@ -2537,6 +2784,7 @@
     });
     if (!on) {
       _autoRunning = false;
+      clearSessionDeadline();
     }
     log(on ? "自动模式=开（未启动，待点逐张/3张评）" : "自动模式=关");
   }
@@ -2558,7 +2806,30 @@
     });
     setAutoSwitchUI(true);
     _autoRunning = false; // allow loop
-    toastMsg(`自动已启动（${batchSize || prev.batchSize || 3}张/批 · 倒计时后提交）`);
+
+    // 定时自动停止：按当前配置算出本次会话绝对停止时刻并持久化（跨刷新保留）
+    let timerNote = "";
+    try {
+      await loadConfigFromStorage();
+      const endAt = computeSessionEndAt(CFG);
+      if (endAt) {
+        saveSessionDeadline({
+          endAt,
+          mode: "clock",
+          label: stopLabelFor(CFG),
+          setAt: Date.now(),
+        });
+        const leftH = (endAt - Date.now()) / 3600000;
+        timerNote = ` · 定时：${stopLabelFor(CFG)}（约剩 ${leftH.toFixed(1)} 小时，到点打完当前题再停）`;
+        log("定时停止已设定 " + stopLabelFor(CFG) + " → " + new Date(endAt).toLocaleString(), "ok");
+      } else {
+        clearSessionDeadline();
+      }
+    } catch (e) {
+      log("设定定时停止失败(忽略)：" + (e && e.message), "err");
+    }
+
+    toastMsg(`自动已启动（${batchSize || prev.batchSize || 3}张/批 · 倒计时后提交）${timerNote}`);
     log("启动自动循环 batch=" + (batchSize || prev.batchSize || 3), "ok");
     autoLoop();
   }
@@ -2864,6 +3135,22 @@
       try {
         if (msg.type === "SIRISER_PING") {
           sendResponse({ ok: true, url: location.href });
+          return;
+        }
+        if (msg.type === "SIRISER_GET_TASK_ID") {
+          sendResponse({ ok: false, error: "答题页 URL 不作为分包 ID 来源，请从标注工作台读取。" });
+          return;
+        }
+        if (msg.type === "SIRISER_GET_ACTIVE_PACKAGE_ID") {
+          const result = readActiveWorkbenchPackageId(document);
+          if (result.ok) {
+            log(`工作台识别到题目 ID：${result.taskId}`, "ok");
+            toastMsg(`识别到题目 ID：${result.taskId}`);
+          } else {
+            log(`工作台题目 ID 识别失败：${result.error}`, "err");
+            toastMsg(`题目 ID 识别失败：${result.error}`);
+          }
+          sendResponse(result);
           return;
         }
         if (msg.type === "SIRISER_COLLECT") {

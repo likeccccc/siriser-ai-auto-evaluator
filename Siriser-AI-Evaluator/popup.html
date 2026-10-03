@@ -33,13 +33,14 @@
     </div>
     <div class="row">
       <button type="button" id="btnTestDing">测试钉钉推送</button>
+      <button type="button" id="btnTestTaskId">测试获取分包 ID</button>
+    </div>
+    <div class="row">
       <button type="button" id="btnTestModelA">测试评委 A</button>
-    </div>
-    <div class="row">
       <button type="button" id="btnTestModelB">测试评委 B</button>
-      <button type="button" id="btnTestModelReview">测试审核模型</button>
     </div>
     <div class="row">
+      <button type="button" id="btnTestModelReview">测试审核模型</button>
       <button type="button" id="btnDiag">诊断选择器</button>
     </div>
     <div class="progress"><i id="prog"></i></div>
@@ -83,6 +84,18 @@
       <button type="button" id="btnImportCfg">导入配置</button>
     </div>
     <input type="file" id="cfgFile" accept="application/json,.json" hidden />
+  </section>
+
+  <section class="card">
+    <h2>定时自动停止（可选）</h2>
+    <label class="chk">
+      <input type="checkbox" id="stopEnabled" />
+      启用：到设定时间后先打完当前题再停，不再领取新题
+    </label>
+    <label>到点时间（24 小时制）
+      <input type="time" id="stopTime" value="18:00" />
+    </label>
+    <small class="field-hint" id="stopHint"></small>
   </section>
 
   <section class="card">

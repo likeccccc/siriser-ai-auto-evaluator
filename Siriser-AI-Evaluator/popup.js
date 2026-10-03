@@ -38,6 +38,8 @@ const DEFAULTS = {
   DINGTALK_WEBHOOK: "",
   AUTO_SUBMIT: false,
   AUTO_NEXT: true,
+  AUTO_STOP_ENABLED: false,
+  AUTO_STOP_TIME: "",
 };
 
 const SCORING_PROFILES = {
@@ -132,6 +134,8 @@ async function saveConfig() {
     OPENAI_API_KEY: $("oaKey").value.trim(),
     AUTO_SUBMIT: false,
     AUTO_NEXT: true,
+    AUTO_STOP_ENABLED: !!$("stopEnabled").checked,
+    AUTO_STOP_TIME: ($("stopTime").value || "").trim(),
   };
   await chrome.storage.sync.set({ SIRISER_CONFIG: cfg });
   // 同步到 content 的 window.SIRISER_CONFIG
@@ -164,7 +168,19 @@ async function initForm() {
   $("dualThreshold").value = cfg.DUAL_DIFF_THRESHOLD != null ? cfg.DUAL_DIFF_THRESHOLD : 3;
   $("dingWebhook").value = cfg.DINGTALK_WEBHOOK || "";
   $("oaKey").value = cfg.OPENAI_API_KEY || "";
+  $("stopEnabled").checked = !!cfg.AUTO_STOP_ENABLED;
+  $("stopTime").value = cfg.AUTO_STOP_TIME || "18:00";
+  refreshStopHint();
 }
+
+/** 依据是否启用给出提示（已固定为「到点时刻」一种方式） */
+function refreshStopHint() {
+  $("stopHint").textContent = $("stopEnabled").checked
+    ? "到设定钟点停；若启动时已过点，顺延到次日同一时刻。到点会先打完并提交当前题，再停止、不再领取新题。"
+    : "未启用：自动模式不会定时停止。";
+}
+
+$("stopEnabled").addEventListener("change", refreshStopHint);
 
 $("scoringMode").addEventListener("change", updateScoringModeHint);
 
@@ -530,7 +546,7 @@ $("btnTestDing").addEventListener("click", async () => {
     try {
       const res = await fetch(hook, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json;charset=utf-8" },
         body: JSON.stringify({ msgtype: "text", text: { content: text } }),
       });
       const body = await res.text();
@@ -566,6 +582,84 @@ $("btnTestDing").addEventListener("click", async () => {
     }
   } catch (e) {
     setStatus(e.message, "err");
+    $("preview").textContent = String(e);
+  }
+});
+
+// Keep the extension popup alive while the workbench page loads and answers.
+function popupDelay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function testWorkbenchPackageIdAndPush(sourceTab, webhook) {
+  const options = { url: WORKBENCH_URL, active: false };
+  if (Number.isInteger(sourceTab && sourceTab.windowId) && sourceTab.windowId >= 0) {
+    options.windowId = sourceTab.windowId;
+  }
+  const workbenchTab = await chrome.tabs.create(options);
+  if (!workbenchTab || !Number.isInteger(workbenchTab.id)) throw new Error("无法打开标注工作台");
+
+  let lastError = "工作台 content script 尚未响应";
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    try {
+      const result = await chrome.tabs.sendMessage(
+        workbenchTab.id,
+        { type: "SIRISER_GET_ACTIVE_PACKAGE_ID" },
+        { frameId: 0 }
+      );
+      if (result && result.ok && result.taskId) {
+        const hook = String(webhook || "").trim();
+        if (!hook) return { ok: false, taskId: result.taskId, workbenchTabId: workbenchTab.id, error: "已读到题目 ID，但未填写钉钉 Webhook" };
+        const ding = await chrome.runtime.sendMessage({
+          type: "SIRISER_DINGTALK",
+          webhook: hook,
+          text: `【Siriser 分包ID】\nID：${result.taskId}`,
+        });
+        return {
+          ok: !!(ding && ding.ok),
+          taskId: result.taskId,
+          workbenchTabId: workbenchTab.id,
+          error: ding && (ding.error || ding.body || ding.status),
+        };
+      }
+      if (result && result.error) lastError = result.error;
+    } catch (e) {
+      lastError = String((e && e.message) || e);
+    }
+    await popupDelay(500);
+  }
+  return { ok: false, workbenchTabId: workbenchTab.id, error: lastError };
+}
+
+$("btnTestTaskId").addEventListener("click", async () => {
+  try {
+    const tab = await getActiveTab();
+    if (!tab || !SIRISER_RE.test(tab.url || "")) {
+      setStatus("请先打开标注任务页", "err");
+      $("preview").textContent = "请先打开 Siriser 标注页，再从工作台读取当前进行中任务包的题目 ID。";
+      return;
+    }
+    setStatus("正在后台读取工作台任务包…", "busy");
+    const hook = ($("dingWebhook").value || "").trim();
+    const res = await testWorkbenchPackageIdAndPush(tab, hook);
+    const idText = res && res.taskId ? `题目ID：${res.taskId}` : "未读取到工作台题目 ID";
+    $("statusText").textContent = idText;
+    if (res && res.ok) {
+      setStatus("分包 ID 已推送钉钉", "ok");
+      $("statusText").textContent = `${idText}（已推送）`;
+      $("preview").textContent = `${idText}\n钉钉推送：成功`;
+    } else {
+      const reason = (res && (res.error || res.body || res.status)) || "后台无响应";
+      setStatus(res && res.taskId ? "已获取 ID，但钉钉推送失败" : "读取工作台 ID 失败", "err");
+      $("statusText").textContent = String(reason).slice(0, 180);
+      $("preview").textContent = `${idText}\n${String(reason).slice(0, 300)}`;
+    }
+    // 仅成功后再切换前台；失败时留在弹窗显示原因，工作台标签保留在后台。
+    if (res && res.ok && Number.isInteger(res.workbenchTabId)) {
+      await chrome.tabs.update(res.workbenchTabId, { active: true });
+    }
+  } catch (e) {
+    setStatus("读取分包 ID 失败：" + e.message, "err");
     $("preview").textContent = String(e);
   }
 });
