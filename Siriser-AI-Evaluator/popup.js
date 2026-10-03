@@ -596,39 +596,50 @@ async function testWorkbenchPackageIdAndPush(sourceTab, webhook) {
   if (Number.isInteger(sourceTab && sourceTab.windowId) && sourceTab.windowId >= 0) {
     options.windowId = sourceTab.windowId;
   }
-  const workbenchTab = await chrome.tabs.create(options);
-  if (!workbenchTab || !Number.isInteger(workbenchTab.id)) throw new Error("无法打开标注工作台");
+  let workbenchTabId;
+  try {
+    const workbenchTab = await chrome.tabs.create(options);
+    if (!workbenchTab || !Number.isInteger(workbenchTab.id)) throw new Error("无法打开标注工作台");
+    workbenchTabId = workbenchTab.id;
 
-  let lastError = "工作台 content script 尚未响应";
-  for (let attempt = 0; attempt < 24; attempt += 1) {
-    try {
-      const result = await chrome.tabs.sendMessage(
-        workbenchTab.id,
-        { type: "SIRISER_GET_ACTIVE_PACKAGE_ID" },
-        { frameId: 0 }
-      );
-      if (result && result.ok && result.taskId) {
-        const hook = String(webhook || "").trim();
-        if (!hook) return { ok: false, taskId: result.taskId, workbenchTabId: workbenchTab.id, error: "已读到题目 ID，但未填写钉钉 Webhook" };
-        const ding = await chrome.runtime.sendMessage({
-          type: "SIRISER_DINGTALK",
-          webhook: hook,
-          text: `【Siriser 分包ID】\nID：${result.taskId}`,
-        });
-        return {
-          ok: !!(ding && ding.ok),
-          taskId: result.taskId,
-          workbenchTabId: workbenchTab.id,
-          error: ding && (ding.error || ding.body || ding.status),
-        };
+    let lastError = "工作台 content script 尚未响应";
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      try {
+        const result = await chrome.tabs.sendMessage(
+          workbenchTabId,
+          { type: "SIRISER_GET_ACTIVE_PACKAGE_ID" },
+          { frameId: 0 }
+        );
+        if (result && result.ok && result.taskId) {
+          const hook = String(webhook || "").trim();
+          if (!hook) return { ok: false, taskId: result.taskId, error: "已读到题目 ID，但未填写钉钉 Webhook" };
+          const ding = await chrome.runtime.sendMessage({
+            type: "SIRISER_DINGTALK",
+            webhook: hook,
+            text: `【Siriser 分包ID】\nID：${result.taskId}`,
+          });
+          return {
+            ok: !!(ding && ding.ok),
+            taskId: result.taskId,
+            error: ding && (ding.error || ding.body || ding.status),
+          };
+        }
+        if (result && result.error) lastError = result.error;
+      } catch (e) {
+        lastError = String((e && e.message) || e);
       }
-      if (result && result.error) lastError = result.error;
-    } catch (e) {
-      lastError = String((e && e.message) || e);
+      await popupDelay(500);
     }
-    await popupDelay(500);
+    return { ok: false, error: lastError };
+  } finally {
+    // 测试只临时读取工作台：结束后关掉本次创建的标签并回到原答题页。
+    if (Number.isInteger(workbenchTabId)) {
+      try { await chrome.tabs.remove(workbenchTabId); } catch (_) {}
+    }
+    if (Number.isInteger(sourceTab && sourceTab.id)) {
+      try { await chrome.tabs.update(sourceTab.id, { active: true }); } catch (_) {}
+    }
   }
-  return { ok: false, workbenchTabId: workbenchTab.id, error: lastError };
 }
 
 $("btnTestTaskId").addEventListener("click", async () => {
@@ -653,10 +664,6 @@ $("btnTestTaskId").addEventListener("click", async () => {
       setStatus(res && res.taskId ? "已获取 ID，但钉钉推送失败" : "读取工作台 ID 失败", "err");
       $("statusText").textContent = String(reason).slice(0, 180);
       $("preview").textContent = `${idText}\n${String(reason).slice(0, 300)}`;
-    }
-    // 仅成功后再切换前台；失败时留在弹窗显示原因，工作台标签保留在后台。
-    if (res && res.ok && Number.isInteger(res.workbenchTabId)) {
-      await chrome.tabs.update(res.workbenchTabId, { active: true });
     }
   } catch (e) {
     setStatus("读取分包 ID 失败：" + e.message, "err");

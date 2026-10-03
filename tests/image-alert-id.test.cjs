@@ -48,8 +48,9 @@ test("broken-image alerts and popup test use workbench lookup", () => {
   assert.match(popup, /type: "SIRISER_DINGTALK"/);
   assert.match(popup, /【Siriser 分包ID】\\nID：\$\{result\.taskId\}/);
   assert.match(popup, /chrome\.tabs\.create\(options\)/);
-  assert.match(popup, /chrome\.tabs\.update\(res\.workbenchTabId, \{ active: true \}\)/);
-  assert.match(popup, /res\.ok && Number\.isInteger\(res\.workbenchTabId\)/);
+  assert.match(popup, /chrome\.tabs\.remove\(workbenchTabId\)/);
+  assert.match(popup, /chrome\.tabs\.update\(sourceTab\.id, \{ active: true \}\)/);
+  assert.match(popup, /finally \{[\s\S]*?chrome\.tabs\.remove\(workbenchTabId\)/);
   assert.match(source, /type: "SIRISER_GET_WORKBENCH_PACKAGE_ID"/);
   assert.match(source, /activateWorkbench: true/);
   assert.doesNotMatch(source, /extractTaskIdFromUrl/);
