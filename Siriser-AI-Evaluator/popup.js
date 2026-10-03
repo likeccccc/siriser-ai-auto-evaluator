@@ -38,6 +38,8 @@ const DEFAULTS = {
   DINGTALK_WEBHOOK: "",
   AUTO_SUBMIT: false,
   AUTO_NEXT: true,
+  AUTO_STOP_ENABLED: false,
+  AUTO_STOP_TIME: "",
 };
 
 const SCORING_PROFILES = {
@@ -132,6 +134,8 @@ async function saveConfig() {
     OPENAI_API_KEY: $("oaKey").value.trim(),
     AUTO_SUBMIT: false,
     AUTO_NEXT: true,
+    AUTO_STOP_ENABLED: !!$("stopEnabled").checked,
+    AUTO_STOP_TIME: ($("stopTime").value || "").trim(),
   };
   await chrome.storage.sync.set({ SIRISER_CONFIG: cfg });
   // 同步到 content 的 window.SIRISER_CONFIG
@@ -164,7 +168,19 @@ async function initForm() {
   $("dualThreshold").value = cfg.DUAL_DIFF_THRESHOLD != null ? cfg.DUAL_DIFF_THRESHOLD : 3;
   $("dingWebhook").value = cfg.DINGTALK_WEBHOOK || "";
   $("oaKey").value = cfg.OPENAI_API_KEY || "";
+  $("stopEnabled").checked = !!cfg.AUTO_STOP_ENABLED;
+  $("stopTime").value = cfg.AUTO_STOP_TIME || "18:00";
+  refreshStopHint();
 }
+
+/** 依据是否启用给出提示（已固定为「到点时刻」一种方式） */
+function refreshStopHint() {
+  $("stopHint").textContent = $("stopEnabled").checked
+    ? "到设定钟点停；若启动时已过点，顺延到次日同一时刻。到点会先打完并提交当前题，再停止、不再领取新题。"
+    : "未启用：自动模式不会定时停止。";
+}
+
+$("stopEnabled").addEventListener("change", refreshStopHint);
 
 $("scoringMode").addEventListener("change", updateScoringModeHint);
 
@@ -530,7 +546,7 @@ $("btnTestDing").addEventListener("click", async () => {
     try {
       const res = await fetch(hook, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json;charset=utf-8" },
         body: JSON.stringify({ msgtype: "text", text: { content: text } }),
       });
       const body = await res.text();
