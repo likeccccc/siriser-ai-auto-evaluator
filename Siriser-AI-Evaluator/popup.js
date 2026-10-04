@@ -706,6 +706,45 @@ $("btnSubmit").addEventListener("click", async () => {
 $("versionText").textContent = "v" + chrome.runtime.getManifest().version;
 initForm();
 
+function sendBackgroundMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      const error = chrome.runtime.lastError;
+      if (error) reject(new Error(error.message));
+      else resolve(response || null);
+    });
+  });
+}
+
+async function refreshEvaluationSummary() {
+  const label = $("evaluationSummary");
+  if (!label) return;
+  try {
+    const result = await sendBackgroundMessage({ type: "SIRISER_GET_EVALUATION_SUMMARY" });
+    if (!result || !result.ok) throw new Error((result && result.error) || "读取失败");
+    const today = new Date();
+    const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+    const current = (result.daily || []).find((item) => item.date === date);
+    label.textContent = `本机累计 ${result.packages} 个分包；今日 ${current ? current.packages : 0} 个分包、${current ? current.ratings : 0} 条模型评分。评分完成后自动更新 Excel 工作簿（XML 格式）。`;
+  } catch (error) {
+    label.textContent = `本地统计暂不可读：${error.message}`;
+  }
+}
+
+$("btnExportEvaluations").addEventListener("click", async () => {
+  try {
+    setStatus("正在生成本地评分工作簿…", "busy");
+    const result = await sendBackgroundMessage({ type: "SIRISER_EXPORT_EVALUATION_REPORT" });
+    if (!result || !result.ok) throw new Error((result && result.error) || "导出失败");
+    setStatus(`已导出 ${result.packages} 个分包的评分工作簿`, "ok");
+    await refreshEvaluationSummary();
+  } catch (error) {
+    setStatus(`导出失败：${error.message}`, "err");
+  }
+});
+
+refreshEvaluationSummary();
+
 $("btnOpenWorkbench").addEventListener("click", async () => {
   try {
     setStatus("打开标注工作台…", "busy");

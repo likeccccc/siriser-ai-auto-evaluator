@@ -1809,6 +1809,13 @@
         log(`工作台分包 ID 获取/推送失败：${(res && res.error) || (res && res.body) || "后台无响应"}`, "err");
         return false;
       }
+      const task = window.__SIRISER_LAST_TASK__;
+      if (task) {
+        _evaluationPackageIdCache = {
+          key: evaluationTaskKey(task),
+          result: { ok: true, taskId: String(res.taskId), source: "workbench-question-id" },
+        };
+      }
       log(`工作台题目 ID ${res.taskId} 已发送到钉钉`, "ok");
       return true;
     } catch (e) {
@@ -1821,6 +1828,79 @@
     return ((task && task._cards) || []).filter(
       (m) => m && (m.broken || !(m.images && m.images.length))
     );
+  }
+
+  let _evaluationPackageIdCache = null;
+  function evaluationTaskKey(task) {
+    const models = (task && task.models || []).map((model) => model.id).join(",");
+    return `${location.href}|${String(task && task.prompt || "")}|${models}`;
+  }
+
+  async function captureEvaluationPackageId(task) {
+    const key = evaluationTaskKey(task);
+    if (_evaluationPackageIdCache && _evaluationPackageIdCache.key === key) {
+      return _evaluationPackageIdCache.result;
+    }
+    const result = await sendRuntimeMsg({ type: "SIRISER_CAPTURE_PACKAGE_ID_FOR_STATS" });
+    const normalized = result && result.ok && result.taskId
+      ? { ok: true, taskId: String(result.taskId), source: "workbench-question-id" }
+      : { ok: false, error: String((result && result.error) || "工作台未返回题目 ID") };
+    if (normalized.ok) _evaluationPackageIdCache = { key, result: normalized };
+    return normalized;
+  }
+
+  function buildEvaluationRecord(task, scores, startedAt, packageIdResult, opts) {
+    const completed = new Date();
+    const pad = (value) => String(value).padStart(2, "0");
+    const date = `${completed.getFullYear()}-${pad(completed.getMonth() + 1)}-${pad(completed.getDate())}`;
+    const cards = (task && task._cards) || [];
+    const normalizedScores = (scores || []).map((score) => {
+      const modelId = String(score && score.model || "");
+      const card = cards.find((item) => String(item.id) === modelId);
+      const rawReason = String(score && score.notes || "");
+      const imageStatus = rawReason === "image_load_error"
+        ? "broken"
+        : rawReason === "no_image"
+          ? "missing"
+          : rawReason === "api_returned_null" || score && score._skipClick
+            ? "no-score"
+            : "ok";
+      return {
+        modelId,
+        modelName: String(card && card.name || modelId),
+        alignment: score && score.alignment != null ? Number(score.alignment) : null,
+        quality: score && score.quality != null ? Number(score.quality) : null,
+        preservation: score && score.preservation != null ? Number(score.preservation) : null,
+        consistency: score && score.consistency != null ? Number(score.consistency) : null,
+        realism: score && score.realism != null ? Number(score.realism) : null,
+        reason: [rawReason, score && score._anomaly ? `规则提示：${score._anomaly}` : ""].filter(Boolean).join("；"),
+        imageStatus,
+      };
+    });
+    const taskKey = evaluationTaskKey(task);
+    let hash = 2166136261;
+    for (let i = 0; i < taskKey.length; i += 1) {
+      hash ^= taskKey.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    const taskId = packageIdResult && packageIdResult.ok ? packageIdResult.taskId : "";
+    return {
+      recordKey: taskId ? `task:${taskId}` : `pending:${(hash >>> 0).toString(16)}`,
+      localTaskKey: (hash >>> 0).toString(16),
+      taskId,
+      idSource: taskId ? "workbench-question-id" : "unavailable",
+      idError: taskId ? "" : String(packageIdResult && packageIdResult.error || "工作台未返回唯一题目 ID").slice(0, 180),
+      date,
+      startedAt: startedAt.toISOString(),
+      completedAt: completed.toISOString(),
+      elapsedMs: completed.getTime() - startedAt.getTime(),
+      scoringMode: String(CFG.SCORING_MODE || "fast"),
+      runMode: opts && opts.autoMode ? "自动" : "手动",
+      evaluatorA: String(CFG.OPENAI_MODEL || ""),
+      evaluatorB: String(CFG.OPENAI_MODEL_2 || ""),
+      reviewer: String(CFG.OPENAI_MODEL_REVIEW || ""),
+      scores: normalizedScores,
+    };
   }
 
   function wakeImageLoading(issues) {
@@ -1997,11 +2077,17 @@
   }
 
   async function runAutoScore(onlyCurrent, opts) {
-    const t0 = Date.now();
+    const startedAt = new Date();
+    const t0 = startedAt.getTime();
     await loadConfigFromStorage();
     setStatusDock("准备任务", "加载配置 / 识别页面");
     const batchSize = Math.max(1, Number((opts && opts.batchSize) || CFG.BATCH_SIZE || 1));
     const task = await collectTaskWithImageRecheck();
+    // 后台读取工作台唯一进行中任务 ID，不抢焦点；评分本身继续并行执行。
+    const packageIdPromise = captureEvaluationPackageId(task).catch((error) => ({
+      ok: false,
+      error: String(error && error.message || error),
+    }));
     log(
       `采集 models=${task.models.length} 有图=${task._meta.withImg} ref=${task._meta.hasRef} 批大小=${batchSize} prompt=${task.prompt.slice(0, 24)}…`
     );
@@ -2091,6 +2177,15 @@
           _forceNa: true,
         };
       }
+      if (allNull && s._networkFailedBoth) {
+        log(`${src.id} 双评委补缺均失败 → 勾选“无”，其余图片评分保留`, "err");
+        return {
+          ...s,
+          model: src.id,
+          notes: s.notes || "双评委网络补缺失败",
+          _forceNa: true,
+        };
+      }
       if (allNull) {
         log(`${src.id} 本地有图但 API 无分，跳过勾选`, "err");
         return {
@@ -2110,6 +2205,17 @@
       batchSize,
       apiMs: Date.now() - t0,
     });
+    const packageIdResult = await packageIdPromise;
+    const record = buildEvaluationRecord(task, scores, startedAt, packageIdResult, opts);
+    const saveResult = await sendRuntimeMsg({ type: "SIRISER_SAVE_EVALUATION", record });
+    if (saveResult && saveResult.ok) {
+      if (!record.taskId) log(`评分已记入本地台账，但题目 ID 待补：${record.idError}`, "err");
+      else log(`评分已按工作台题目 ID ${record.taskId} 记入本地台账`, "ok");
+      if (!saveResult.exported) log(`本地记录已保存，Excel 自动更新失败：${saveResult.exportError || "请稍后在扩展弹窗手动导出"}`, "err");
+      else log("Excel 本地工作簿已自动更新", "ok");
+    } else {
+      log(`评分完成，但本地台账保存失败：${(saveResult && saveResult.error) || "后台无响应"}`, "err");
+    }
     log("完成 · 用时 " + fmtDur(Date.now() - t0), "ok");
     setStatusDock("本题完成", `用时 ${fmtDur(Date.now() - t0)}`, "ok");
     beepDone();
@@ -2217,6 +2323,8 @@
   function missingScoreIds(scores) {
     return (scores || [])
       .filter((s) => {
+        // 双评委对单图补缺均失败已是最终逐图结果，不触发整题重跑。
+        if (s._networkFailedBoth) return false;
         if (s._skipClick) return true;
         if (s.notes === "no_image" || s.notes === "image_load_error" || s._forceNa) return false;
         return DIMS.every((k) => s[k] == null || s[k] === "na");

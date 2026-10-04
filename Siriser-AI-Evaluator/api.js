@@ -38,7 +38,7 @@
         if (!transient || e.fatal) throw e;
         if (attempt >= 2) {
           e.channelFailure = true;
-          slog(`${label} 网络重试2次仍失败，停止本评委`, "err");
+          slog(`${label} 网络重试2次仍失败 → 标记 missing，继续后续任务`, "err");
           throw e;
         }
         const delay = (attempt + 1) * 5000;
@@ -611,7 +611,31 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
    * 用指定 VL 模型把 models 全部打一遍分
    * @param cleanTask 已压缩 {prompt, referenceImages, models}
    */
-  async function scoreAllWithModel(cleanTask, cfg, modelName) {
+  function isNoImageScore(score) {
+    return !!score && (score.notes === "no_image" || score.notes === "image_load_error");
+  }
+
+  function isMissingScore(score) {
+    return !!score && !isNoImageScore(score) && DIM_KEYS.every((key) => score[key] == null || score[key] === "na");
+  }
+
+  function makeMissingScore(model, evaluator, error, phase) {
+    const id = normModelId(model && model.id);
+    const reason = String(error && error.message || error || "API 未返回有效评分");
+    return {
+      model: id,
+      alignment: null,
+      quality: null,
+      preservation: null,
+      consistency: null,
+      realism: null,
+      notes: "missing",
+      _missing: true,
+      _failure: { evaluator: evaluator, modelName: evaluator, imageId: id, reason: reason, phase: phase || "first-round" },
+    };
+  }
+
+  async function scoreAllWithModel(cleanTask, cfg, modelName, role, phase) {
     const wanted = cleanTask.models.map((m) => normModelId(m.id));
     const byId = new Map();
     const batchSize = Math.max(1, Number(cfg.BATCH_SIZE) || 1);
@@ -628,19 +652,29 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     let step = 0;
     let cursor = 0;
     let fatalErr = null;
+    const phaseLabel = phase === "refill" ? "补缺" : "第一轮";
+
+    function markBatchMissing(batch, error) {
+      batch.forEach((model) => byId.set(normModelId(model.id), makeMissingScore(model, modelName, error, phaseLabel)));
+      slog(`${modelName} ${batch.map((model) => normModelId(model.id)).join(",")} 重试2次仍失败 → 标记 missing，继续后续任务（${String(error && error.message || error)}）`, "err");
+    }
 
     async function runOne(batch) {
       step += 1;
-      slog(`[ ${modelName} ] 进度 ${step}/${total} …`);
+      slog(`[ ${modelName} ] ${phaseLabel}进度 ${step}/${total} …`);
       if (parallel > 1) await new Promise((r) => setTimeout(r, 200));
       let part = null;
       try {
         part = await callOpenAIBatch(cleanTask, batch, subCfg);
       } catch (e) {
         const msg = String(e && e.message);
-        if (e && (e.fatal || e.channelFailure)) {
-          if (e.fatal) cfg._stopJudges?.();
-          slog("停止本评委，停止评分：" + msg, "err");
+        if (e && e.channelFailure && !e.fatal) {
+          markBatchMissing(batch, e);
+          return;
+        }
+        if (e && e.fatal) {
+          cfg._stopJudges?.();
+          slog("致命 API 错误，停止本评委：" + msg, "err");
           throw e;
         }
         if (/403|access_denied/i.test(msg)) {
@@ -658,6 +692,10 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
             part = await callOpenAIBatch(cleanTask, batch, subCfg);
           } catch (e2) {
             slog("重试仍失败：" + (e2 && e2.message), "err");
+            if (e2 && e2.channelFailure && !e2.fatal) {
+              markBatchMissing(batch, e2);
+              return;
+            }
             throw e2;
           }
         } else if (/abort|timeout/i.test(msg)) {
@@ -713,24 +751,38 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       }
     } else {
       slog(`并发打分 x${parallel}`);
-      await Promise.all(Array.from({ length: parallel }, () => worker()));
+      await Promise.allSettled(Array.from({ length: parallel }, () => worker()));
     }
     if (fatalErr) throw fatalErr;
 
-    return wanted.map((id) => {
+    const result = wanted.map((id) => {
       const hit = byId.get(id);
-      if (hit) return hit;
       const m = cleanTask.models.find((x) => normModelId(x.id) === id);
-      return {
-        model: id,
-        alignment: null,
-        quality: null,
-        preservation: null,
-        consistency: null,
-        realism: null,
-        notes: m && m.images.length ? "missing_in_response" : "no_image",
-      };
+      if (hit && !isMissingScore(hit)) return hit;
+      if (!m || !m.images || !m.images.length) {
+        return hit || {
+          model: id,
+          alignment: null,
+          quality: null,
+          preservation: null,
+          consistency: null,
+          realism: null,
+          notes: "no_image",
+        };
+      }
+      const reason = hit && hit._failure ? hit._failure.reason : (hit && hit.notes) || "API 响应中未返回有效评分";
+      const missing = makeMissingScore(m, modelName, reason, phaseLabel);
+      if (hit && hit._failure) missing._failure = hit._failure;
+      return missing;
     });
+    const missing = result.filter(isMissingScore);
+    const missingIds = missing.map((score) => score.model);
+    if (phase === "refill") {
+      slog(`补缺评委${role || ""}结果：${result.length - missing.length}/${result.length}${missingIds.length ? `，仍missing=${missingIds.join(",")}` : "，全部恢复"}`);
+    } else {
+      slog(`评委${role || modelName}完成：${result.length - missing.length}/${result.length}${missingIds.length ? `，missing=${missingIds.join(",")}` : ""}`);
+    }
+    return result;
   }
 
   function maxDimDiff(a, b) {
@@ -1148,7 +1200,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       let scoresB = null;
       const tJudge = Date.now();
       if (dual) {
-        // 双评委并行，墙钟时间约减半
+        // 双评委先各自完成第一轮；单张网络失败被记录为 missing，不中断同评委后续图片。
         slog("双评委并行开跑");
         const controller = new AbortController();
         const judgeCfg = {
@@ -1157,29 +1209,116 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         };
         const runJudge = async (model, role) => {
           try {
-            return await scoreAllWithModel(cleanTask, judgeCfg, model);
+            return await scoreAllWithModel(cleanTask, judgeCfg, model, role, "first-round");
           } catch (e) {
-            if (e.channelFailure && !e.fatal && !controller.signal.aborted) {
-              slog(`评委${role}降级：${model} 网络重试耗尽，等待存活评委完成`, "err");
-              return null;
-            }
             controller.abort();
             throw e;
           }
         };
-        const [a, b] = await Promise.all([
+        const firstRound = await Promise.allSettled([
           runJudge(modelA, "A"),
           runJudge(modelB, "B"),
         ]);
-        if (!a && !b) throw new Error("两个评委均网络失败，停止本题");
-        scoresA = a || b;
-        scoresB = a && b ? b : null;
-        survivingModel = a ? modelA : modelB;
-        if (!scoresB) slog(`降级单评委继续：${survivingModel}`);
+        const firstError = firstRound.find((x) => x.status === "rejected");
+        if (firstError) throw firstError.reason;
+        scoresA = firstRound[0].value;
+        scoresB = firstRound[1].value;
+
+        const refillJudge = async (scores, model, role) => {
+          const missingIds = scores.filter(isMissingScore).map((s) => s.model);
+          if (!missingIds.length) return scores;
+          slog(`开始补缺：${model} × ${missingIds.join(",")}`);
+          const missingTask = {
+            ...cleanTask,
+            models: cleanTask.models.filter((m) => missingIds.includes(normModelId(m.id))),
+          };
+          const retried = await scoreAllWithModel(missingTask, judgeCfg, model, role, "refill");
+          const retryById = new Map(retried.map((s) => [normModelId(s.model), s]));
+          return scores.map((original) => {
+            if (!isMissingScore(original)) return original;
+            const recovered = retryById.get(normModelId(original.model));
+            if (recovered && !isMissingScore(recovered)) {
+              slog(`补缺成功 ${original.model} → 恢复双评委合并`);
+              return recovered;
+            }
+            return {
+              ...original,
+              _failure: {
+                ...(original._failure || {}),
+                evaluator: model,
+                modelName: model,
+                imageId: original.model,
+                reason: recovered && recovered._failure ? recovered._failure.reason : (original._failure && original._failure.reason) || "补缺未返回有效评分",
+                phase: "refill",
+              },
+            };
+          });
+        };
+
+        // 两个评委都完成第一轮后再进入统一补缺阶段；补缺失败不影响另一评委结果。
+        const refillResults = await Promise.allSettled([
+          refillJudge(scoresA, modelA, "A"),
+          refillJudge(scoresB, modelB, "B"),
+        ]);
+        const refillError = refillResults.find((x) => x.status === "rejected");
+        if (refillError) throw refillError.reason;
+        scoresA = refillResults[0].value;
+        scoresB = refillResults[1].value;
+        survivingModel = modelA;
         slog(`双评委并行完成 用时 ${((Date.now() - tJudge) / 1000).toFixed(0)}s`);
       } else {
-        scoresA = await scoreAllWithModel(cleanTask, cfg, modelA);
+        scoresA = await scoreAllWithModel(cleanTask, cfg, modelA, "A", "first-round");
         slog(`评委A 完成 用时 ${((Date.now() - tJudge) / 1000).toFixed(0)}s`);
+      }
+
+      if (dual) {
+        const aById = new Map(scoresA.map((s) => [normModelId(s.model), s]));
+        const bById = new Map(scoresB.map((s) => [normModelId(s.model), s]));
+        const aMerged = scoresA.map((a) => {
+          const b = bById.get(normModelId(a.model));
+          if (isMissingScore(a) && b && !isMissingScore(b)) {
+            slog(`补缺失败 ${a.model} → 使用 ${modelB} 单评委结果降级`, "err");
+            return { ...b, notes: `${b.notes || ""} [${modelA}缺失，使用${modelB}单评委结果]`.trim(), _singleJudgeFallback: modelB };
+          }
+          if (isMissingScore(a) && isMissingScore(b)) {
+            slog(`两个评委补缺仍失败 ${a.model} → 该图评分失败`, "err");
+            return {
+              ...a,
+              notes: "双评委网络补缺失败",
+              _networkFailedBoth: true,
+              _failure: [a._failure, b._failure].filter(Boolean),
+            };
+          }
+          return a;
+        });
+        const bMerged = scoresB.map((b) => {
+          const a = aById.get(normModelId(b.model));
+          if (isMissingScore(b) && a && !isMissingScore(a)) {
+            slog(`补缺失败 ${b.model} → 使用 ${modelA} 单评委结果降级`, "err");
+            return { ...a, notes: `${a.notes || ""} [${modelB}缺失，使用${modelA}单评委结果]`.trim(), _singleJudgeFallback: modelA };
+          }
+          return b;
+        });
+        const { merged, needReview } = mergeDualScores(aMerged, bMerged, threshold);
+        const mergedById = new Map(merged.map((s) => [normModelId(s.model), s]));
+        let final = cleanTask.models.map((m) => {
+          const id = normModelId(m.id);
+          const a = aById.get(id);
+          const b = bById.get(id);
+          if (isMissingScore(a) && isMissingScore(b)) {
+            return { ...a, _networkFailedBoth: true, _failure: [a._failure, b._failure].filter(Boolean) };
+          }
+          return mergedById.get(id) || a || b;
+        });
+        slog(`双模型合并：待审 ${needReview.length} 个 / 阈值 ${threshold}`);
+        const reviewDeadline = Date.now() + Math.max(20000, Number(cfg.REVIEW_BUDGET_MS) || 90000);
+        if (needReview.length && modelR) {
+          const reviewed = await reviewScores(cleanTask, needReview, cfg, reviewDeadline);
+          const revMap = new Map(reviewed.map((s) => [s.model, s]));
+          final = final.map((m) => revMap.get(m.model) || m);
+        }
+        const reviewed2 = await applyPolicyReview(cleanTask, final, cfg, reviewDeadline);
+        return applyGeometryDistortionCaps(rankSpreadScores(reviewed2));
       }
 
       // 空分：用当前存活评委重试一次，避免再次调用失败渠道。
@@ -1213,24 +1352,6 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         if (scoreAvg(scoresA[i]) == null) {
           scoresA[i] = { ...scoresA[i], notes: "api_returned_null" };
         }
-      }
-
-      // 两个评委均成功时保持原有合并逻辑。
-      if (scoresB) {
-        const { merged, needReview } = mergeDualScores(scoresA, scoresB, threshold);
-        slog(`双模型合并：待审 ${needReview.length} 个 / 阈值 ${threshold}`);
-        let final = merged;
-        // 双分差审核 + 规则审核共用同一时间预算，防止叠成 2×90s
-        const reviewDeadline =
-          Date.now() + Math.max(20000, Number(cfg.REVIEW_BUDGET_MS) || 90000);
-        if (needReview.length && modelR) {
-          const reviewed = await reviewScores(cleanTask, needReview, cfg, reviewDeadline);
-          const revMap = new Map(reviewed.map((s) => [s.model, s]));
-          final = merged.map((m) => revMap.get(m.model) || m);
-        }
-        const reviewed2 = await applyPolicyReview(cleanTask, final, cfg, reviewDeadline);
-        // 保序拉开，避免人人 9/8/9/8/7
-        return applyGeometryDistortionCaps(rankSpreadScores(reviewed2));
       }
 
       const reviewDeadline2 =

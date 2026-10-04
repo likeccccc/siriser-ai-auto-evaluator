@@ -107,6 +107,7 @@ button.primary {
   margin-top: 4px;
 }
 button.primary:hover { background: #0b5c56; color: #fff; }
+#btnExportEvaluations { width: 100%; }
 
 label {
   display: block;
