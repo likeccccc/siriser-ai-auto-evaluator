@@ -2507,6 +2507,25 @@
     return true;
   }
 
+  function planAutoSubmitTiming(elapsedMs, targetMs, hardCapMs, extensionMs) {
+    const elapsed = Math.max(0, Number(elapsedMs) || 0);
+    const target = Math.max(0, Number(targetMs) || 0);
+    const hardCap = Math.max(0, Number(hardCapMs) || 0);
+    if (elapsed >= hardCap) {
+      return { effectiveTargetMs: elapsed, waitMs: 0, submitImmediately: true };
+    }
+    if (elapsed < target) {
+      return { effectiveTargetMs: target, waitMs: target - elapsed, submitImmediately: false };
+    }
+    const extension = Math.max(0, Number(extensionMs) || 0);
+    const effectiveTargetMs = Math.min(hardCap, elapsed + extension);
+    return {
+      effectiveTargetMs,
+      waitMs: Math.max(0, effectiveTargetMs - elapsed),
+      submitImmediately: false,
+    };
+  }
+
   async function autoOneTask(gen) {
     const myGen = gen == null ? _autoGen : gen;
     await clearStoredCountdown();
@@ -2571,35 +2590,25 @@
     const wait = targetMs - elapsed;
     setStatusDock("等待提交", `已用 ${fmtDur(elapsed)} / ${fmtDur(targetMs)}`, "ok");
 
-    // 已经超过 6–8 分钟目标：
-    // 评分本身就慢时（日志常见 20–35s/张）硬判超时不合理——分数已出来，应在短等后提交。
-    // 仅当超过 15 分钟硬上限才停止并钉钉。
-    let effectiveTarget = targetMs;
-    if (wait <= 0) {
-      if (elapsed >= TOTAL_HARD_CAP_MS) {
-        clearCountdownInPanel();
-        log(
-          `已超硬上限 elapsed=${fmtDur(elapsed)} ≥ ${fmtDur(TOTAL_HARD_CAP_MS)}，停止自动并等待人工`,
-          "err"
-        );
-        toastMsg("超过 15 分钟硬上限，已停止自动，请人工核对后提交");
-        setStatusDock("已暂停", "超时，等待人工提交", "err");
-        updateCountdownInPanel("已超时 · 未自动提交", true);
-        await stopAuto(
-          `运行超时未提交：用时 ${fmtDur(elapsed)} 超过硬上限 ${fmtDur(TOTAL_HARD_CAP_MS)}，请人工核对后提交`
-        );
-        return false;
-      }
-      // 评分拖长 → 目标顺延到「刚评完 + 45–90s 短等」，仍自动交
-      const extend = 45000 + Math.floor(Math.random() * 45001);
-      effectiveTarget = Math.min(TOTAL_HARD_CAP_MS, elapsed + extend);
+    // 15 分钟只限制评分完成后的额外等待，不得阻止已完成评分的自动提交。
+    const extend = wait <= 0 ? 45000 + Math.floor(Math.random() * 45001) : 0;
+    const submitPlan = planAutoSubmitTiming(elapsed, targetMs, TOTAL_HARD_CAP_MS, extend);
+    const effectiveTarget = submitPlan.effectiveTargetMs;
+    const wait2 = submitPlan.waitMs;
+    if (submitPlan.submitImmediately) {
+      log(
+        `评分/勾选用时 ${fmtDur(elapsed)}，已超过 ${fmtDur(TOTAL_HARD_CAP_MS)}；评分完成，立即自动提交`,
+        "err"
+      );
+      toastMsg("评分耗时较长，正在立即自动提交");
+      setStatusDock("立即提交", `已用 ${fmtDur(elapsed)} · 评分已完成`, "ok");
+    } else if (wait <= 0) {
       log(
         `评分/勾选已用 ${fmtDur(elapsed)} 超过原目标 ${fmtDur(targetMs)}，顺延到 ${fmtDur(effectiveTarget)} 后提交（不中断）`
       );
       toastMsg("评分较慢，总时长已顺延，稍后自动提交");
       setStatusDock("等待提交", `顺延 · 已用 ${fmtDur(elapsed)}`, "ok");
     }
-    const wait2 = Math.max(0, effectiveTarget - elapsed);
 
     const deadline = Date.now() + wait2;
     const taskKey = (taskPromptKey() || "t") + "@" + Date.now();

@@ -54,6 +54,7 @@ const VERSION_NOTES = {
   "1.0.42": "工作台存在唯一进行中任务时不再依赖固定的「去回答 / 释放」按钮文案；有多个进行中任务才用操作文案消歧。",
   "1.0.43": "分包 ID 钉钉消息标题统一为「【Siriser 分包ID】」，并将 ID 放在下一行，便于识别和转发。",
   "1.0.44": "测试获取分包 ID 完成后自动关闭临时工作台标签并回到原答题页。",
+  "1.0.46": "评分与拟人勾选耗时超过15分钟时不再停止并漏交；评分完成后立即自动提交。",
 };
 const LAST_VER_KEY = "SIRISER_LAST_NOTIFIED_VER";
 const SIRISER_WORKBENCH_URL = "https://www.siriser.com/siriser/workbench";
