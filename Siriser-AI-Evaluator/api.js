@@ -7,12 +7,57 @@
 
   async function fetchWithTimeout(url, options, timeoutMs) {
     const ctrl = new AbortController();
+    const cancel = () => ctrl.abort();
+    if (options.signal?.aborted) cancel();
+    options.signal?.addEventListener("abort", cancel, { once: true });
     const t = setTimeout(() => ctrl.abort(), timeoutMs || 90000);
     try {
       const res = await fetch(url, { ...options, signal: ctrl.signal });
       return res;
     } finally {
       clearTimeout(t);
+      options.signal?.removeEventListener("abort", cancel);
+    }
+  }
+
+  // 只重试明确的传输故障，不重试认证、请求格式或评分内容错误。
+  async function fetchWithRetry(url, options, timeoutMs, label) {
+    for (let attempt = 0; ; attempt++) {
+      if (options.signal?.aborted) throw new Error("评分已取消");
+      try {
+        const res = await fetchWithTimeout(url, options, timeoutMs);
+        if (res.status !== 502 && res.status !== 503) return res;
+        await res.body?.cancel().catch(() => {});
+        const err = new Error("API失败 HTTP " + res.status);
+        err.networkFailure = true;
+        throw err;
+      } catch (e) {
+        if (options.signal?.aborted) throw e;
+        const transient = e.networkFailure || e.name === "AbortError" ||
+          /failed to fetch|networkerror|network error|load failed|timeout|timed out|超时/i.test(String(e.message));
+        if (!transient || e.fatal) throw e;
+        if (attempt >= 2) {
+          e.channelFailure = true;
+          slog(`${label} 网络重试2次仍失败，停止本评委`, "err");
+          throw e;
+        }
+        const delay = (attempt + 1) * 5000;
+        slog(`${label} 网络故障，${delay / 1000}s后重试 ${attempt + 1}/2`);
+        await new Promise((resolve, reject) => {
+          const signal = options.signal;
+          const cancel = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", cancel);
+            reject(new Error("评分已取消"));
+          };
+          const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", cancel);
+            resolve();
+          }, delay);
+          signal?.addEventListener("abort", cancel, { once: true });
+          if (signal?.aborted) cancel();
+        });
+      }
     }
   }
 
@@ -509,66 +554,12 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       `请求 ${models.map((m) => m.id).join(",")} model=${modelName} 超时=${(timeout / 1000).toFixed(0)}s`
     );
 
-    const doPost = (b) =>
-      fetchWithTimeout(
-        base + "/chat/completions",
-        { method: "POST", headers, body: JSON.stringify(b) },
-        timeout
-      );
-
-    let res;
-    try {
-      res = await doPost(body);
-    } catch (e) {
-      if (/abort/i.test(String(e && e.message))) {
-        throw new Error(
-          `请求超时(${(timeout / 1000).toFixed(0)}s) ${models.map((m) => m.id).join(",")} model=${modelName}`
-        );
-      }
-      throw e;
-    }
-
-    if (res.status === 400) {
-      const errText = await res.text().catch(() => "");
-      slog("HTTP400 " + errText.slice(0, 140));
-      // 模型根本不认图片：立刻失败，禁止纯文本瞎猜（浪费 token）
-      if (/unexpected item type|invalid.*content/i.test(errText)) {
-        const err = new Error(
-          "API失败：模型" + modelName + " 拒收多模态内容（Unexpected item type）。请换带 vl 的视觉模型。"
-        );
-        err.fatal = true;
-        throw err;
-      }
-      let canRetrySafely = false;
-      if (/response_format|json_object|json_schema/i.test(errText) && body.response_format) {
-        delete body.response_format;
-        canRetrySafely = true;
-        slog("端点不支持 response_format，保留成本保护后重试");
-      }
-      if (/max_completion_tokens/i.test(errText) && body.max_completion_tokens) {
-        delete body.max_completion_tokens;
-        body.max_tokens = outputLimit;
-        canRetrySafely = true;
-        slog("端点不支持 max_completion_tokens，改用 max_tokens 重试");
-      }
-      // 对已知支持关闭思考的 Qwen3，绝不删除此参数后裸跑。
-      if (/enable_thinking/i.test(errText) && !isQwen3Family) {
-        delete body.enable_thinking;
-        canRetrySafely = true;
-      }
-      if (!canRetrySafely) {
-        const err = new Error("API失败 HTTP 400 " + errText.slice(0, 300));
-        err.fatal = true;
-        throw err;
-      }
-      res = await doPost(body);
-      if (!res.ok) {
-        const t2 = await res.text().catch(() => "");
-        const err = new Error("API失败 HTTP " + res.status + " " + t2.slice(0, 300));
-        err.fatal = true;
-        throw err;
-      }
-    }
+    const res = await fetchWithRetry(
+      base + "/chat/completions",
+      { method: "POST", headers, body: JSON.stringify(body), signal: cfg._judgeSignal },
+      timeout,
+      modelName + " " + models.map((m) => m.id).join(",")
+    );
 
     if (!res.ok) {
       const t = await res.text().catch(() => "");
@@ -647,8 +638,9 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         part = await callOpenAIBatch(cleanTask, batch, subCfg);
       } catch (e) {
         const msg = String(e && e.message);
-        if (e && e.fatal) {
-          slog("致命错误，停止评分：" + msg, "err");
+        if (e && (e.fatal || e.channelFailure)) {
+          if (e.fatal) cfg._stopJudges?.();
+          slog("停止本评委，停止评分：" + msg, "err");
           throw e;
         }
         if (/403|access_denied/i.test(msg)) {
@@ -688,7 +680,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     }
 
     async function worker() {
-      while (cursor < batches.length && !fatalErr) {
+      while (cursor < batches.length && !fatalErr && !cfg._judgeSignal?.aborted) {
         const idx = cursor++;
         const batch = batches[idx];
         try {
@@ -698,7 +690,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
             fatalErr = e;
             return;
           }
-          fatalErr = e;
+          if (!fatalErr) fatalErr = e;
           return;
         }
       }
@@ -706,7 +698,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
 
     if (parallel <= 1) {
       for (let i = 0; i < batches.length; i++) {
-        if (fatalErr) break;
+        if (fatalErr || cfg._judgeSignal?.aborted) break;
         try {
           await runOne(batches[i]);
         } catch (e) {
@@ -1036,6 +1028,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
           continue;
         }
       } catch (e) {
+        if (e && e.fatal) throw e;
         slog(`审核失败 ${item.model} ${e && e.message}`, "err");
       }
       out.push({
@@ -1112,7 +1105,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     // 1) 自定义 API（整批一次）
     if (cfg.API_URL) {
       const body = (global.buildEvalRequest || ((t) => t))(cleanTask);
-      const res = await fetchWithTimeout(
+      const res = await fetchWithRetry(
         cfg.API_URL,
         {
           method: "POST",
@@ -1122,7 +1115,8 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
           },
           body: JSON.stringify(body),
         },
-        cfg.TIMEOUT_MS
+        cfg.TIMEOUT_MS,
+        "自定义评分API"
       );
       if (!res.ok) {
         const t = await res.text().catch(() => "");
@@ -1150,24 +1144,45 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       );
       const dual = !!(modelB && modelB !== modelA);
       let scoresA;
+      let survivingModel = modelA;
       let scoresB = null;
       const tJudge = Date.now();
       if (dual) {
         // 双评委并行，墙钟时间约减半
         slog("双评委并行开跑");
+        const controller = new AbortController();
+        const judgeCfg = {
+          ...cfg, _judgeSignal: controller.signal,
+          _stopJudges: () => controller.abort(),
+        };
+        const runJudge = async (model, role) => {
+          try {
+            return await scoreAllWithModel(cleanTask, judgeCfg, model);
+          } catch (e) {
+            if (e.channelFailure && !e.fatal && !controller.signal.aborted) {
+              slog(`评委${role}降级：${model} 网络重试耗尽，等待存活评委完成`, "err");
+              return null;
+            }
+            controller.abort();
+            throw e;
+          }
+        };
         const [a, b] = await Promise.all([
-          scoreAllWithModel(cleanTask, cfg, modelA),
-          scoreAllWithModel(cleanTask, cfg, modelB),
+          runJudge(modelA, "A"),
+          runJudge(modelB, "B"),
         ]);
-        scoresA = a;
-        scoresB = b;
+        if (!a && !b) throw new Error("两个评委均网络失败，停止本题");
+        scoresA = a || b;
+        scoresB = a && b ? b : null;
+        survivingModel = a ? modelA : modelB;
+        if (!scoresB) slog(`降级单评委继续：${survivingModel}`);
         slog(`双评委并行完成 用时 ${((Date.now() - tJudge) / 1000).toFixed(0)}s`);
       } else {
         scoresA = await scoreAllWithModel(cleanTask, cfg, modelA);
         slog(`评委A 完成 用时 ${((Date.now() - tJudge) / 1000).toFixed(0)}s`);
       }
 
-      // 空分：用评委 A 重试一次（保持旧行为）
+      // 空分：用当前存活评委重试一次，避免再次调用失败渠道。
       for (let i = 0; i < scoresA.length; i++) {
         const s = scoresA[i];
         const localHasImg = models.some(
@@ -1181,7 +1196,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
           const retry = await callOpenAIBatch(
             { prompt: cleanTask.prompt, referenceImages: [], models: one },
             one,
-            { ...cfg, OPENAI_MODEL: modelA, TIMEOUT_MS: 60000, REQUEST_ROLE: "judge" }
+            { ...cfg, OPENAI_MODEL: survivingModel, TIMEOUT_MS: 60000, REQUEST_ROLE: "judge" }
           );
           const hit =
             retry.find((r) => normModelId(r.model) === s.model) ||
@@ -1192,6 +1207,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
             slog(`重评成功 ${s.model}`);
           }
         } catch (e) {
+          if (e && e.fatal) throw e;
           slog(`重评失败 ${s.model} ${e && e.message}`);
         }
         if (scoreAvg(scoresA[i]) == null) {
@@ -1199,8 +1215,8 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         }
       }
 
-      // 双模型
-      if (dual) {
+      // 两个评委均成功时保持原有合并逻辑。
+      if (scoresB) {
         const { merged, needReview } = mergeDualScores(scoresA, scoresB, threshold);
         slog(`双模型合并：待审 ${needReview.length} 个 / 阈值 ${threshold}`);
         let final = merged;
