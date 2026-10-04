@@ -1890,6 +1890,10 @@
     if (_lastImageAlertKey !== alertKey) {
       _lastImageAlertKey = alertKey;
       await notifyImageIssueTaskId();
+      await notifyDingTalk(
+        `重新检测后仍异常：${detail}。对应模型五维将勾「无」。`,
+        "【Siriser 图片无加载】"
+      );
     }
     return task;
   }
