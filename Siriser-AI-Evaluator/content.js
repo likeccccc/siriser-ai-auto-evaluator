@@ -1841,7 +1841,20 @@
     if (_evaluationPackageIdCache && _evaluationPackageIdCache.key === key) {
       return _evaluationPackageIdCache.result;
     }
-    const result = await sendRuntimeMsg({ type: "SIRISER_CAPTURE_PACKAGE_ID_FOR_STATS" });
+    const result = await new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage({ type: "SIRISER_CAPTURE_PACKAGE_ID_FOR_STATS" }, (response) => {
+          const runtimeError = chrome.runtime.lastError;
+          if (runtimeError) {
+            resolve({ ok: false, error: `后台消息失败：${runtimeError.message}` });
+            return;
+          }
+          resolve(response || { ok: false, error: "后台未返回题目 ID 结果" });
+        });
+      } catch (error) {
+        resolve({ ok: false, error: `后台消息异常：${String(error && error.message || error)}` });
+      }
+    });
     const normalized = result && result.ok && result.taskId
       ? { ok: true, taskId: String(result.taskId), source: "workbench-question-id" }
       : { ok: false, error: String((result && result.error) || "工作台未返回题目 ID") };
@@ -2233,7 +2246,16 @@
       batchSize,
       apiMs: Date.now() - t0,
     });
-    const packageIdResult = await packageIdPromise;
+    let packageIdResult = await packageIdPromise;
+    if (!packageIdResult || !packageIdResult.ok) {
+      log(`首轮获取题目 ID 失败（${String(packageIdResult && packageIdResult.error || "未知原因")}），评分结束后复查一次`, "err");
+      packageIdResult = await captureEvaluationPackageId(task);
+      if (packageIdResult && packageIdResult.ok) {
+        log(`题目 ID 复查成功：${packageIdResult.taskId}`, "ok");
+      } else {
+        log(`题目 ID 复查仍失败：${String(packageIdResult && packageIdResult.error || "工作台未返回题目 ID")}`, "err");
+      }
+    }
     const record = buildEvaluationRecord(task, scores, startedAt, packageIdResult, opts);
     let saveResult = await sendRuntimeMsg({ type: "SIRISER_SAVE_EVALUATION", record });
     if (!saveResult || !saveResult.ok) {

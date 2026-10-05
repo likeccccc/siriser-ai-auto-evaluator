@@ -160,6 +160,42 @@ test("automatic package ID lookup reads in a background tab and closes it", asyn
   assert.equal(calls.some((call) => call[0] === "update"), false);
 });
 
+test("evaluation ID capture preserves background errors and retries are not cached", async () => {
+  const responses = [
+    { lastError: "The message port closed before a response was received." },
+    { response: { ok: true, taskId: "TASK-RETRY" } },
+  ];
+  let requests = 0;
+  const context = {
+    location: { href: "https://www.siriser.com/siriser/labeling/task?id=answer-page-id" },
+    chrome: {
+      runtime: {
+        lastError: null,
+        sendMessage(_message, callback) {
+          requests += 1;
+          const next = responses.shift();
+          this.lastError = next.lastError ? { message: next.lastError } : null;
+          callback(next.response);
+          this.lastError = null;
+        },
+      },
+    },
+  };
+  const start = contentSource.indexOf("  let _evaluationPackageIdCache = null;");
+  const end = contentSource.indexOf("\n  function saveEvaluationRecordDirect(", start);
+  assert.ok(start >= 0 && end > start, "content script should expose the evaluation ID capture helper");
+  vm.runInNewContext(`${contentSource.slice(start, end)}\nglobalThis.captureId = captureEvaluationPackageId;`, context);
+
+  const task = { prompt: "test prompt", models: [{ id: "A" }] };
+  const first = await context.captureId(task);
+  assert.equal(first.ok, false);
+  assert.match(first.error, /后台消息失败.*message port closed/i);
+  const second = await context.captureId(task);
+  assert.equal(second.ok, true);
+  assert.equal(second.taskId, "TASK-RETRY");
+  assert.equal(requests, 2);
+});
+
 test("later workbench ID promotes a pending record and partial model ratings merge", async () => {
   const local = {};
   const context = {
@@ -205,6 +241,6 @@ test("later workbench ID promotes a pending record and partial model ratings mer
 
 test("manifest grants automatic local workbook downloads and extension version is bumped", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(extensionDir, "manifest.json"), "utf8"));
-  assert.equal(manifest.version, "1.0.51");
+  assert.equal(manifest.version, "1.0.52");
   assert.ok(manifest.permissions.includes("downloads"));
 });

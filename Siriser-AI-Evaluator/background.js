@@ -46,6 +46,7 @@ async function fetchBlob(url) {
 
 /** 各版本更新说明（键=版本号，值=多行文本），版本升级时随钉钉公告推送 */
 const VERSION_NOTES = {
+  "1.0.52": "修复本地评分台账偶发缺失题目 ID：延长工作台异步表格读取等待，并在评分结束、保存前对失败的 ID 捕获复查一次；记录后台消息的具体错误。",
   "1.0.28": "新增「定时自动停止」：到点先打完并提交当前题再停，可走钉钉推送。",
   "1.0.29": "定时停止精简为仅「到点时刻」一种（去掉按运行时长）；新增版本更新自动钉钉公告。",
   "1.0.30": "① 定时自动停止：到点先打完并提交当前题再停、不再领新题，到点走钉钉通知；② 版本更新自动钉钉公告：升级到新版本时自动推送「版本+更新内容」，同版本不重复；③ 修复钉钉推送中文乱码：请求头补 charset=utf-8（三处发送均已修正）。",
@@ -194,7 +195,8 @@ async function readActiveWorkbenchPackageId(sourceTabId, windowId, activateWorkb
 
   let lastError = "工作台尚未显示唯一的进行中任务包";
   // 工作台列表由前端异步加载；仅读取，不点击「去回答」或「释放」。
-  for (let attempt = 0; attempt < 24; attempt += 1) {
+  // 页面本身加载完成后，Ant Design 表格数据仍可能延迟到达；给慢速网络留出 25 秒。
+  for (let attempt = 0; attempt < 50; attempt += 1) {
     try {
       const result = await chrome.tabs.sendMessage(
         workbenchTab.id,
