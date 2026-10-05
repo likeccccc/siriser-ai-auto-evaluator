@@ -104,3 +104,34 @@ test('18-image dual scoring continues after C fails; successful images are never
  assert.ok(e.logs.some(l=>l.includes('开始补缺：judge-a × C')));
  assert.ok(e.logs.some(l=>l.includes('补缺失败 C → 使用 judge-b 单评委结果降级')));
 });
+test('single judge always sends two baseline samples to the reviewer, even when risk flags are absent',async()=>{
+ const ids=Array.from({length:18},(_,i)=>String.fromCharCode(65+i+(i>=8?1:0)));
+ const t={...task,models:ids.map(id=>({id,images:[image]}))};
+ const requests=[];
+ const e=setup((body)=>{
+   if(body.model==='astra'){
+     const text=body.messages[1].content.find(x=>x.type==='text'&&x.text.includes('【model=')).text;
+     const id=text.match(/【model=([^】]+)】/)?.[1]||'A';requests.push(id);return ok(8,[id]);
+   }
+   const scores=requestedIds(body).map(id=>({model:id,alignment:7,quality:8,preservation:7,consistency:6,realism:7,notes:'存在轻微细节差异'}));
+   return {ok:true,status:200,json:async()=>({choices:[{message:{content:JSON.stringify({scores})}}]})};
+ });
+ await e.evaluate({OPENAI_MODEL_REVIEW:'astra',MAX_REVIEW:1,REVIEW_BUDGET_MS:45000},t);
+ assert.equal(requests.length,2);assert.deepEqual(requests,['E','O']);
+ assert.ok(e.logs.some(l=>l.includes('单模型审核抽检：基线至少2张')));
+});
+test('single judge prioritizes risk candidates and audits no more than five per package',async()=>{
+ const ids=Array.from({length:18},(_,i)=>String.fromCharCode(65+i+(i>=8?1:0)));
+ const t={...task,models:ids.map(id=>({id,images:[image]}))};
+ const requests=[];
+ const e=setup((body)=>{
+   if(body.model==='astra'){
+     const text=body.messages[1].content.find(x=>x.type==='text'&&x.text.includes('【model=')).text;
+     const id=text.match(/【model=([^】]+)】/)?.[1]||'A';requests.push(id);return ok(8,[id]);
+   }
+   return ok(7,requestedIds(body)); // five identical dimensions are a risk signal
+ });
+ await e.evaluate({OPENAI_MODEL_REVIEW:'astra',MAX_REVIEW:1},t);
+ assert.equal(requests.length,5);assert.ok(requests.includes('E')&&requests.includes('O'));
+ assert.ok(e.logs.some(l=>l.includes('本包审核 5 张')));
+});

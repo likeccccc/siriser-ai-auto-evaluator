@@ -968,6 +968,78 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     });
   }
 
+  function singleModelReviewRisk(score) {
+    const values = DIM_KEYS.map((key) => score[key]).filter((value) => typeof value === "number");
+    if (!values.length) return null;
+    const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const spread = Math.max(...values) - Math.min(...values);
+    const reasons = [];
+    if (avg < 6) reasons.push(`均分偏低${avg.toFixed(1)}`);
+    if (avg >= 8.5) reasons.push(`均分偏高${avg.toFixed(1)}`);
+    if (spread >= 4) reasons.push(`维度差距${spread}`);
+    if (values.length === DIM_KEYS.length && spread === 0) reasons.push("五维同分");
+    if (avg >= 8.5 && !(Array.isArray(score.defects) && score.defects.length) && !/瑕疵|问题|缺陷|偏差|模糊|变形|失真/.test(String(score.notes || ""))) {
+      reasons.push("高分缺少明确缺陷依据");
+    }
+    return reasons.length ? { risk: reasons.length + Math.max(0, 6 - avg) * 0.1 + Math.max(0, avg - 8.5) * 0.1, reasons } : null;
+  }
+
+  function selectSingleModelReview(cleanTask, scores) {
+    const withImages = (scores || []).filter((score) => {
+      const model = cleanTask.models.find((item) => normModelId(item.id) === normModelId(score.model));
+      return model && model.images && model.images.length && avgScore(score) != null;
+    });
+    if (!withImages.length) return [];
+
+    const riskItems = withImages
+      .map((score) => ({ score, risk: singleModelReviewRisk(score) }))
+      .filter((item) => item.risk)
+      .sort((a, b) => b.risk.risk - a.risk.risk || normModelId(a.score.model).localeCompare(normModelId(b.score.model)));
+    const selected = new Map();
+
+    // 每包至少两张基线抽检：在候选序列约 1/4、3/4 处均匀取样。
+    const baselineCount = Math.min(2, withImages.length);
+    for (let i = 0; i < baselineCount; i += 1) {
+      const index = Math.min(withImages.length - 1, Math.floor(((i + 0.5) * withImages.length) / baselineCount));
+      const score = withImages[index];
+      selected.set(normModelId(score.model), { score, reasons: ["基线抽检"] });
+    }
+
+    // 风险项优先补足审核队列，单包总计最多 5 张。
+    for (const item of riskItems) {
+      if (selected.size >= 5) break;
+      const id = normModelId(item.score.model);
+      const previous = selected.get(id);
+      selected.set(id, {
+        score: item.score,
+        reasons: [...new Set([...(previous ? previous.reasons : []), ...item.risk.reasons])],
+      });
+    }
+
+    return Array.from(selected.values()).map((item) => ({
+      ...item.score,
+      _singleJudgeReview: true,
+      _reviewReason: item.reasons.join("、"),
+    }));
+  }
+
+  async function applySingleModelReview(cleanTask, scores, cfg) {
+    const reviewer = String(cfg.OPENAI_MODEL_REVIEW || "").trim();
+    if (!reviewer) {
+      slog("单模型审核未执行：未配置审核模型");
+      return scores;
+    }
+    const selected = selectSingleModelReview(cleanTask, scores);
+    if (!selected.length) return scores;
+    const riskCount = selected.filter((item) => item._reviewReason !== "基线抽检").length;
+    slog(`单模型审核抽检：基线至少2张，风险项优先；本包审核 ${selected.length} 张（风险候选 ${riskCount}，上限5）→ ${reviewer}`);
+    const auditCfg = { ...cfg, MAX_REVIEW: 5 };
+    const deadline = Date.now() + Math.max(240000, Number(cfg.REVIEW_BUDGET_MS) || 0);
+    const reviewed = await reviewScores(cleanTask, selected, auditCfg, deadline);
+    const byId = new Map(reviewed.map((item) => [normModelId(item.model), item]));
+    return scores.map((score) => byId.get(normModelId(score.model)) || score);
+  }
+
   /**
    * 审核次数上限 + 时间预算，防止 15 个模型各审 2 分钟导致超时。
    * 优先审分差最大的；deadline 可跨多次 reviewScores 共用。
@@ -1035,14 +1107,14 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       const a = item._a || item;
       const b = item._b || item;
       const userParts = [];
+      const reviewInstruction = item._singleJudgeReview
+        ? `这是单评委评分结果的独立复核，不是双评委分差裁决。复核原因：${item._reviewReason || "风险抽检"}。\n初评模型：${cfg.OPENAI_MODEL || "未知"}\n初评五维分数：${DIM_KEYS.map((k) => k + "=" + a[k]).join(" ")}\n初评理由：${a.notes || "无"}\n请直接依据编辑指令、参考图与结果图独立检查这份评分；只有评分确有依据时才保留高分。输出 JSON {"model","alignment","quality","preservation","consistency","realism","notes"}，1–10 整数或 null，禁止五维同分。`
+        : `两个评委对 model=${item.model} 打分不一致（分差 ${item._diff}）。\n评委A：${DIM_KEYS.map((k) => k + "=" + a[k]).join(" ")} notes=${a.notes || ""}\n评委B：${DIM_KEYS.map((k) => k + "=" + b[k]).join(" ")} notes=${b.notes || ""}\n请对照下列图片独立裁决，只输出 JSON {"model","alignment","quality","preservation","consistency","realism","notes"}，1–10 整数或 null。禁止五维同分。`;
       userParts.push({
         type: "text",
         text:
           `编辑指令：\n${cleanTask.prompt}\n\n` +
-          `两个评委对 model=${item.model} 打分不一致（分差 ${item._diff}）。\n` +
-          `评委A：${DIM_KEYS.map((k) => k + "=" + a[k]).join(" ")} notes=${a.notes || ""}\n` +
-          `评委B：${DIM_KEYS.map((k) => k + "=" + b[k]).join(" ")} notes=${b.notes || ""}\n` +
-          `请对照下列图片独立裁决，只输出 JSON {"model","alignment","quality","preservation","consistency","realism","notes"}，1–10 整数或 null。禁止五维同分。`,
+          reviewInstruction,
       });
       (cleanTask.referenceImages || []).forEach((src, i) => {
         userParts.push({ type: "text", text: `reference[${i}]` });
@@ -1356,7 +1428,7 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
 
       const reviewDeadline2 =
         Date.now() + Math.max(20000, Number(cfg.REVIEW_BUDGET_MS) || 90000);
-      const reviewed3 = await applyPolicyReview(cleanTask, scoresA, cfg, reviewDeadline2);
+      const reviewed3 = await applySingleModelReview(cleanTask, scoresA, cfg);
       return applyGeometryDistortionCaps(rankSpreadScores(reviewed3));
     }
 

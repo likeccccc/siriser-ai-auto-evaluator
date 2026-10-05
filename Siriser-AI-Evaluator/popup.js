@@ -66,7 +66,10 @@ function scoringProfile(mode) {
 
 function updateScoringModeHint() {
   const mode = $("scoringMode").value || "fast";
-  $("scoringModeHint").textContent = scoringProfile(mode).hint;
+  const singleAuditHint = $("oaModelReview").value.trim() && !$("oaModel2").value.trim()
+    ? " 单模型时审核模型会抽检2张并优先复核风险图，每包最多5张；会增加耗时和 Token。"
+    : "";
+  $("scoringModeHint").textContent = scoringProfile(mode).hint + singleAuditHint;
 }
 
 function setStatus(text, kind) {
@@ -183,6 +186,8 @@ function refreshStopHint() {
 $("stopEnabled").addEventListener("change", refreshStopHint);
 
 $("scoringMode").addEventListener("change", updateScoringModeHint);
+$("oaModel2").addEventListener("input", updateScoringModeHint);
+$("oaModelReview").addEventListener("input", updateScoringModeHint);
 
 async function sendToPage(msg) {
   const tab = await getActiveTab();
@@ -706,12 +711,31 @@ $("btnSubmit").addEventListener("click", async () => {
 $("versionText").textContent = "v" + chrome.runtime.getManifest().version;
 initForm();
 
-function sendBackgroundMessage(message) {
+const EVALUATIONS_KEY = "SIRISER_EVALUATION_RECORDS";
+
+function readLocalEvaluationRecords() {
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(message, (response) => {
+    chrome.storage.local.get([EVALUATIONS_KEY], (result) => {
       const error = chrome.runtime.lastError;
       if (error) reject(new Error(error.message));
-      else resolve(response || null);
+      else resolve(Array.isArray(result && result[EVALUATIONS_KEY]) ? result[EVALUATIONS_KEY] : []);
+    });
+  });
+}
+
+function downloadLocalEvaluationWorkbook(records) {
+  const xml = SiriserEvaluationReport.buildEvaluationWorkbookXml(records);
+  const url = "data:application/vnd.ms-excel;base64," + SiriserEvaluationReport.utf8Base64(xml);
+  return new Promise((resolve, reject) => {
+    chrome.downloads.download({
+      url,
+      filename: "Siriser-评测统计/本地评分统计.xml",
+      conflictAction: "overwrite",
+      saveAs: false,
+    }, (downloadId) => {
+      const error = chrome.runtime.lastError;
+      if (error) reject(new Error(error.message));
+      else resolve(downloadId);
     });
   });
 }
@@ -720,12 +744,12 @@ async function refreshEvaluationSummary() {
   const label = $("evaluationSummary");
   if (!label) return;
   try {
-    const result = await sendBackgroundMessage({ type: "SIRISER_GET_EVALUATION_SUMMARY" });
-    if (!result || !result.ok) throw new Error((result && result.error) || "读取失败");
+    const records = await readLocalEvaluationRecords();
+    const daily = SiriserEvaluationReport.reportDailySummary(records);
     const today = new Date();
     const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-    const current = (result.daily || []).find((item) => item.date === date);
-    label.textContent = `本机累计 ${result.packages} 个分包；今日 ${current ? current.packages : 0} 个分包、${current ? current.ratings : 0} 条模型评分。评分完成后自动更新 Excel 工作簿（XML 格式）。`;
+    const current = daily.find((item) => item.date === date);
+    label.textContent = `本机累计 ${records.length} 个分包；今日 ${current ? current.packages : 0} 个分包、${current ? current.ratings : 0} 条模型评分。评分完成后自动更新 Excel 工作簿（XML 格式）。`;
   } catch (error) {
     label.textContent = `本地统计暂不可读：${error.message}`;
   }
@@ -734,9 +758,9 @@ async function refreshEvaluationSummary() {
 $("btnExportEvaluations").addEventListener("click", async () => {
   try {
     setStatus("正在生成本地评分工作簿…", "busy");
-    const result = await sendBackgroundMessage({ type: "SIRISER_EXPORT_EVALUATION_REPORT" });
-    if (!result || !result.ok) throw new Error((result && result.error) || "导出失败");
-    setStatus(`已导出 ${result.packages} 个分包的评分工作簿`, "ok");
+    const records = await readLocalEvaluationRecords();
+    await downloadLocalEvaluationWorkbook(records);
+    setStatus(`已导出 ${records.length} 个分包的评分工作簿`, "ok");
     await refreshEvaluationSummary();
   } catch (error) {
     setStatus(`导出失败：${error.message}`, "err");

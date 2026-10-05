@@ -67,7 +67,7 @@
     <label>Model 2（评委 B，可选；须能看图的 vl 模型）
       <input type="text" id="oaModel2" placeholder="留空 = 单模型" />
     </label>
-    <label>审核模型（分差大时裁决，可选）
+    <label>审核模型（双评委分差裁决 / 单模型风险抽检，可选）
       <input type="text" id="oaModelReview" placeholder="qwen-vl-max / 留空=用均值" />
     </label>
     <label>评分模式
@@ -109,6 +109,7 @@
     <pre id="preview" class="preview">（尚未读取）</pre>
   </section>
 
+  <script src="evaluation-report.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

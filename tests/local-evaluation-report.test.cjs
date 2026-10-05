@@ -6,16 +6,32 @@ const vm = require("node:vm");
 
 const extensionDir = path.join(__dirname, "../Siriser-AI-Evaluator");
 const backgroundSource = fs.readFileSync(path.join(extensionDir, "background.js"), "utf8");
+const reportSource = fs.readFileSync(path.join(extensionDir, "evaluation-report.js"), "utf8");
+const popupSource = fs.readFileSync(path.join(extensionDir, "popup.js"), "utf8");
+const contentSource = fs.readFileSync(path.join(extensionDir, "content.js"), "utf8");
 
 function loadReportHelpers() {
-  const start = backgroundSource.indexOf("function reportScoreAverage(");
-  const end = backgroundSource.indexOf("function utf8Base64(", start);
-  assert.ok(start >= 0 && end > start, "report builder helpers should exist");
   const context = {};
-  vm.runInNewContext(
-    `${backgroundSource.slice(start, end)}\nglobalThis.helpers = { reportScoreAverage, reportDailySummary, buildEvaluationWorkbookXml };`,
-    context
-  );
+  vm.runInNewContext(reportSource, context);
+  return context.SiriserEvaluationReport;
+}
+
+function loadBackground(context) {
+  context.importScripts = (...files) => {
+    for (const file of files) {
+      assert.equal(file, "evaluation-report.js");
+      vm.runInNewContext(reportSource, context);
+    }
+  };
+  vm.runInNewContext(backgroundSource, context);
+}
+
+function loadPopupReportHelpers(context) {
+  vm.runInNewContext(reportSource, context);
+  const start = popupSource.indexOf("const EVALUATIONS_KEY =");
+  const end = popupSource.indexOf("async function refreshEvaluationSummary()", start);
+  assert.ok(start >= 0 && end > start, "popup should read/export reports directly from local storage");
+  vm.runInNewContext(`${popupSource.slice(start, end)}\nglobalThis.helpers = { readLocalEvaluationRecords, downloadLocalEvaluationWorkbook };`, context);
   return context.helpers;
 }
 
@@ -75,6 +91,48 @@ test("Excel-compatible workbook contains three sheets and escapes score reasons"
   assert.match(xml, /评分理由\/备注/);
 });
 
+test("popup reads local stats and exports workbook without a background message round-trip", async () => {
+  const saved = [{ date: "2026-10-05", taskId: "LOCAL-1", scores: [{ modelId: "A", alignment: 8 }] }];
+  let downloadOptions;
+  const context = {
+    TextEncoder,
+    btoa,
+    chrome: {
+      runtime: { lastError: null },
+      storage: { local: { get(_keys, callback) { callback({ SIRISER_EVALUATION_RECORDS: saved }); } } },
+      downloads: { download(options, callback) { downloadOptions = options; callback(9); } },
+    },
+  };
+  const helpers = loadPopupReportHelpers(context);
+  assert.equal((await helpers.readLocalEvaluationRecords()).length, 1);
+  assert.equal(await helpers.downloadLocalEvaluationWorkbook(saved), 9);
+  assert.equal(downloadOptions.filename, "Siriser-评测统计/本地评分统计.xml");
+  assert.equal(downloadOptions.conflictAction, "overwrite");
+  const xml = Buffer.from(downloadOptions.url.split(",")[1], "base64").toString("utf8");
+  assert.match(xml, /LOCAL-1/);
+});
+
+test("content-side storage fallback merges a record when background messaging is unavailable", async () => {
+  const saved = { SIRISER_EVALUATION_RECORDS: [{ recordKey: "pending:x", localTaskKey: "x", taskId: "", scores: [{ modelId: "A", alignment: 7 }] }] };
+  const context = {
+    chrome: {
+      runtime: { lastError: null },
+      storage: { local: {
+        get(keys, callback) { callback(Object.fromEntries(keys.filter((key) => key in saved).map((key) => [key, saved[key]]))); },
+        set(values, callback) { Object.assign(saved, values); callback(); },
+      } },
+    },
+  };
+  const start = contentSource.indexOf("  function saveEvaluationRecordDirect(record) {");
+  const end = contentSource.indexOf("\n  function buildEvaluationRecord(", start);
+  assert.ok(start >= 0 && end > start, "content script should have a local-save fallback");
+  vm.runInNewContext(`${contentSource.slice(start, end)}\nglobalThis.saveRecord = saveEvaluationRecordDirect;`, context);
+  const count = await context.saveRecord({ recordKey: "task:Q-1", localTaskKey: "x", taskId: "Q-1", scores: [{ modelId: "B", alignment: 9 }] });
+  assert.equal(count, 1);
+  assert.equal(saved.SIRISER_EVALUATION_RECORDS[0].taskId, "Q-1");
+  assert.deepEqual(Array.from(saved.SIRISER_EVALUATION_RECORDS[0].scores, (score) => score.modelId).sort(), ["A", "B"]);
+});
+
 test("automatic package ID lookup reads in a background tab and closes it", async () => {
   const calls = [];
   const context = {
@@ -92,7 +150,7 @@ test("automatic package ID lookup reads in a background tab and closes it", asyn
       },
     },
   };
-  vm.runInNewContext(backgroundSource, context);
+  loadBackground(context);
 
   const result = await context.lookupPackageIdForEvaluation(12, 4);
   assert.equal(result.ok, true);
@@ -123,7 +181,7 @@ test("later workbench ID promotes a pending record and partial model ratings mer
     },
     btoa,
   };
-  vm.runInNewContext(backgroundSource, context);
+  loadBackground(context);
   await context.persistEvaluationRecord({
     recordKey: "pending:abc",
     localTaskKey: "abc",
@@ -147,6 +205,6 @@ test("later workbench ID promotes a pending record and partial model ratings mer
 
 test("manifest grants automatic local workbook downloads and extension version is bumped", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(extensionDir, "manifest.json"), "utf8"));
-  assert.equal(manifest.version, "1.0.49");
+  assert.equal(manifest.version, "1.0.51");
   assert.ok(manifest.permissions.includes("downloads"));
 });

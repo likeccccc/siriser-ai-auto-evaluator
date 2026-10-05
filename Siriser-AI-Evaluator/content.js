@@ -1849,6 +1849,34 @@
     return normalized;
   }
 
+  function saveEvaluationRecordDirect(record) {
+    const key = "SIRISER_EVALUATION_RECORDS";
+    return new Promise((resolve, reject) => {
+      chrome.storage.local.get([key], (result) => {
+        const getError = chrome.runtime.lastError;
+        if (getError) return reject(new Error(getError.message));
+        const records = Array.isArray(result && result[key]) ? result[key] : [];
+        let index = records.findIndex((item) => item.recordKey === record.recordKey);
+        if (index < 0 && record.taskId && record.localTaskKey) {
+          index = records.findIndex((item) => !item.taskId && item.localTaskKey === record.localTaskKey);
+        }
+        if (index >= 0) {
+          const previous = records[index];
+          const byModel = new Map((previous.scores || []).map((score) => [score.modelId, score]));
+          (record.scores || []).forEach((score) => byModel.set(score.modelId, score));
+          records[index] = { ...previous, ...record, scores: Array.from(byModel.values()) };
+        } else {
+          records.push(record);
+        }
+        chrome.storage.local.set({ [key]: records }, () => {
+          const setError = chrome.runtime.lastError;
+          if (setError) reject(new Error(setError.message));
+          else resolve(records.length);
+        });
+      });
+    });
+  }
+
   function buildEvaluationRecord(task, scores, startedAt, packageIdResult, opts) {
     const completed = new Date();
     const pad = (value) => String(value).padStart(2, "0");
@@ -2207,11 +2235,25 @@
     });
     const packageIdResult = await packageIdPromise;
     const record = buildEvaluationRecord(task, scores, startedAt, packageIdResult, opts);
-    const saveResult = await sendRuntimeMsg({ type: "SIRISER_SAVE_EVALUATION", record });
+    let saveResult = await sendRuntimeMsg({ type: "SIRISER_SAVE_EVALUATION", record });
+    if (!saveResult || !saveResult.ok) {
+      try {
+        await saveEvaluationRecordDirect(record);
+        saveResult = {
+          ok: true,
+          exported: false,
+          exportError: "后台未响应；评分记录已由页面直接保存，请在弹窗重新导出工作簿",
+          fallback: true,
+        };
+        log("后台台账消息未响应，已切换为页面本地保存", "err");
+      } catch (error) {
+        log(`后台与页面本地保存都失败：${error && error.message || error}`, "err");
+      }
+    }
     if (saveResult && saveResult.ok) {
       if (!record.taskId) log(`评分已记入本地台账，但题目 ID 待补：${record.idError}`, "err");
       else log(`评分已按工作台题目 ID ${record.taskId} 记入本地台账`, "ok");
-      if (!saveResult.exported) log(`本地记录已保存，Excel 自动更新失败：${saveResult.exportError || "请稍后在扩展弹窗手动导出"}`, "err");
+      if (!saveResult.exported) log(`本地记录已保存，Excel 自动更新失败：${saveResult.exportError || "请稍后在弹窗手动导出"}`, "err");
       else log("Excel 本地工作簿已自动更新", "ok");
     } else {
       log(`评分完成，但本地台账保存失败：${(saveResult && saveResult.error) || "后台无响应"}`, "err");
