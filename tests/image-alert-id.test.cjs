@@ -53,6 +53,10 @@ test("broken-image alerts and popup test use workbench lookup", () => {
   assert.match(popup, /finally \{[\s\S]*?chrome\.tabs\.remove\(workbenchTabId\)/);
   assert.match(source, /type: "SIRISER_GET_WORKBENCH_PACKAGE_ID"/);
   assert.match(source, /activateWorkbench: true/);
+  assert.match(source, /const packageIdResult = await notifyImageIssueTaskId\(\)/);
+  assert.match(source, /分包ID：\$\{packageIdResult\.taskId\}/);
+  assert.match(source, /分包ID获取失败：/);
+  assert.match(source, /\{ includePage: false \}/);
   assert.doesNotMatch(source, /extractTaskIdFromUrl/);
 });
 

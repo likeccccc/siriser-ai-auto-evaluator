@@ -1361,6 +1361,7 @@
       _humanModeCached = await loadHumanMode();
     }
     const pacedClicks = !!_humanModeCached;
+    if (pacedClicks && !_humanDurationCached) await loadHumanDuration();
     const plannedClicks = scores.reduce((count, s) => {
       if (s._skipClick) return count;
       const bag = groups.get(s.model) || {};
@@ -1369,13 +1370,10 @@
         return cell && pickTargetEl(cell.options, s[dim]);
       }).length;
     }, 0);
-    // 90 格完整题约 5–6 分钟；只评少量模型时按实际格数缩短。
+    // 完整题的拟人点击总时长由用户在 2–4 / 3–5 / 4–6 分钟档中选择。
     const fullTask = scores.length >= 15;
-    const humanTargetMs = pacedClicks && plannedClicks
-      ? Math.round(
-          (5 * 60 * 1000 + Math.random() * 60 * 1000) *
-            (fullTask ? 1 : plannedClicks / 90)
-        )
+    const humanTargetMs = pacedClicks
+      ? calculateHumanClickTargetMs(_humanDurationCached || "4-6", plannedClicks, fullTask)
       : 0;
     const weights = Array.from(
       { length: plannedClicks },
@@ -1387,7 +1385,7 @@
       "点击节奏：" +
         (!pacedClicks
           ? "拟人关闭（60ms/格）"
-          : `拟人开启（计划 ${plannedClicks} 格 / ${fmtDur(humanTargetMs)}）`)
+          : `拟人开启（${formatHumanDuration(_humanDurationCached || "4-6")}档，计划 ${plannedClicks} 格 / ${fmtDur(humanTargetMs)}）`)
     );
 
     for (const s of scores) {
@@ -1805,9 +1803,10 @@
         webhook: hook,
         activateWorkbench: true,
       });
-      if (!res || !res.ok) {
-        log(`工作台分包 ID 获取/推送失败：${(res && res.error) || (res && res.body) || "后台无响应"}`, "err");
-        return false;
+      if (!res || !res.ok || !res.taskId) {
+        const error = String((res && (res.error || res.body)) || "后台无响应");
+        log(`工作台分包 ID 获取/推送失败：${error}`, "err");
+        return { ok: false, error };
       }
       const task = window.__SIRISER_LAST_TASK__;
       if (task) {
@@ -1817,10 +1816,11 @@
         };
       }
       log(`工作台题目 ID ${res.taskId} 已发送到钉钉`, "ok");
-      return true;
+      return { ok: true, taskId: String(res.taskId) };
     } catch (e) {
-      log("分包 ID 钉钉推送失败：" + (e && e.message), "err");
-      return false;
+      const error = String((e && e.message) || e || "未知错误");
+      log("分包 ID 钉钉推送失败：" + error, "err");
+      return { ok: false, error };
     }
   }
 
@@ -2010,10 +2010,14 @@
     const alertKey = `${location.href}|${String(task.prompt || "").slice(0, 80)}`;
     if (_lastImageAlertKey !== alertKey) {
       _lastImageAlertKey = alertKey;
-      await notifyImageIssueTaskId();
+      const packageIdResult = await notifyImageIssueTaskId();
+      const packageIdLine = packageIdResult && packageIdResult.ok
+        ? `分包ID：${packageIdResult.taskId}`
+        : `分包ID获取失败：${String((packageIdResult && packageIdResult.error) || "未知原因")}`;
       await notifyDingTalk(
-        `重新检测后仍异常：${detail}。对应模型五维将勾「无」。`,
-        "【Siriser 图片无加载】"
+        `重新检测后仍异常：${detail}。对应模型五维将勾「无」。\n${packageIdLine}`,
+        "【Siriser 图片无加载】",
+        { includePage: false }
       );
     }
     return task;
@@ -2506,7 +2510,7 @@
     }
   }
 
-  async function notifyDingTalk(text, prefix) {
+  async function notifyDingTalk(text, prefix, options) {
     try {
       await loadConfigFromStorage();
       const hook = String((CFG && CFG.DINGTALK_WEBHOOK) || "").trim();
@@ -2514,12 +2518,12 @@
         log("未配置钉钉 Webhook，跳过推送", "err");
         return false;
       }
+      const includePage = !(options && options.includePage === false);
       const body =
         (prefix || "【Siriser 标注异常】") +
         "\n" +
         text.slice(0, 800) +
-        "\n页面：" +
-        location.href.slice(0, 120) +
+        (includePage ? "\n页面：" + location.href.slice(0, 120) : "") +
         "\n时间：" +
         new Date().toLocaleString();
 
@@ -3401,6 +3405,49 @@
   }
 
   const HUMAN_KEY = "SIRISER_HUMAN_CLICK";
+  const HUMAN_DURATION_KEY = "SIRISER_HUMAN_CLICK_DURATION";
+  const HUMAN_DURATION_PRESETS = {
+    "2-4": { minMs: 2 * 60 * 1000, maxMs: 4 * 60 * 1000 },
+    "3-5": { minMs: 3 * 60 * 1000, maxMs: 5 * 60 * 1000 },
+    "4-6": { minMs: 4 * 60 * 1000, maxMs: 6 * 60 * 1000 },
+  };
+  let _humanDurationCached = null;
+
+  function normalizeHumanDuration(value) {
+    return Object.prototype.hasOwnProperty.call(HUMAN_DURATION_PRESETS, value) ? value : "4-6";
+  }
+  function formatHumanDuration(value) {
+    return normalizeHumanDuration(value).replace("-", "–") + " 分钟";
+  }
+  function calculateHumanClickTargetMs(duration, plannedClicks, fullTask, randomValue) {
+    if (!plannedClicks) return 0;
+    const preset = HUMAN_DURATION_PRESETS[normalizeHumanDuration(duration)];
+    const random = Number.isFinite(randomValue) ? Math.max(0, Math.min(0.999999, randomValue)) : Math.random();
+    const scale = fullTask ? 1 : Math.min(1, Math.max(0, plannedClicks / 90));
+    return Math.round((preset.minMs + (preset.maxMs - preset.minMs) * random) * scale);
+  }
+
+  function loadHumanDuration() {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get([HUMAN_DURATION_KEY], (result) => {
+          _humanDurationCached = normalizeHumanDuration(result && result[HUMAN_DURATION_KEY]);
+          resolve(_humanDurationCached);
+        });
+      } catch (_) {
+        _humanDurationCached = "4-6";
+        resolve(_humanDurationCached);
+      }
+    });
+  }
+  function saveHumanDuration(value) {
+    _humanDurationCached = normalizeHumanDuration(value);
+    try {
+      chrome.storage.local.set({ [HUMAN_DURATION_KEY]: _humanDurationCached });
+    } catch (_) {}
+    return _humanDurationCached;
+  }
+
   function loadHumanMode() {
     return new Promise((resolve) => {
       try {
@@ -3420,7 +3467,8 @@
     const sw = document.getElementById("siriser-human-switch");
     const lb = document.getElementById("siriser-human-label");
     if (sw) sw.classList.toggle("on", !!on);
-    if (lb) lb.textContent = on ? "已开启拟人点击（全题5–6分钟）" : "已关闭拟人点击";
+    const selectedDuration = (document.getElementById("siriser-human-duration") || {}).value || _humanDurationCached || "4-6";
+    if (lb) lb.textContent = on ? `已开启拟人点击（全题${formatHumanDuration(selectedDuration)}）` : "已关闭拟人点击";
   }
 
   /** 用随机权重分配总时长，并按累计时间校准，避免页面滚动导致越点越慢。 */
@@ -3447,9 +3495,17 @@
           <span class="sir-toggle-label" id="siriser-auto-label">已关闭自动模式</span>
           <span class="sir-switch" id="siriser-auto-switch"><i></i></span>
         </div>
-        <div class="sir-toggle-row" data-act="human-toggle" role="button" tabindex="0" title="完整一题约 90 格，勾选用时 5–6 分钟">
+        <div class="sir-toggle-row" data-act="human-toggle" role="button" tabindex="0" title="开启后可按所选时长拟人勾选">
           <span class="sir-toggle-label" id="siriser-human-label">已关闭拟人点击</span>
           <span class="sir-switch" id="siriser-human-switch"><i></i></span>
+        </div>
+        <div class="sir-human-duration">
+          <label for="siriser-human-duration">完整题模拟点击时长</label>
+          <select id="siriser-human-duration" aria-label="完整题模拟点击时长">
+            <option value="2-4">2–4 分钟</option>
+            <option value="3-5">3–5 分钟</option>
+            <option value="4-6">4–6 分钟</option>
+          </select>
         </div>
         <button type="button" class="primary" data-act="eval-1"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h7"/></svg>逐张评全部</button>
         <button type="button" class="primary" data-act="eval-3"><svg class="sir-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="7" height="7" rx="1.5"/><rect x="14" y="4" width="7" height="7" rx="1.5"/><rect x="3" y="13" width="7" height="7" rx="1.5"/></svg>3张合评全部</button>
@@ -3483,6 +3539,21 @@
     const menu = root.querySelector("#siriser-menu");
     const diag = root.querySelector("#siriser-diag");
     const diagBody = root.querySelector("#siriser-diag-body");
+    const humanDurationSelect = root.querySelector("#siriser-human-duration");
+    if (humanDurationSelect) {
+      Promise.all([loadHumanDuration(), loadHumanMode()]).then(([duration, enabled]) => {
+        humanDurationSelect.value = duration;
+        _humanModeCached = enabled;
+        setHumanSwitchUI(enabled);
+      });
+      humanDurationSelect.addEventListener("change", async () => {
+        const duration = saveHumanDuration(humanDurationSelect.value);
+        if (_humanModeCached == null) _humanModeCached = await loadHumanMode();
+        setHumanSwitchUI(_humanModeCached);
+        toastMsg(`模拟点击时长已设为 ${formatHumanDuration(duration)}`);
+        log(`模拟点击时长=${formatHumanDuration(duration)}`);
+      });
+    }
 
     let dragging = false,
       moved = false,
@@ -3646,7 +3717,7 @@
         const on = !(await loadHumanMode());
         saveHumanMode(on);
         setHumanSwitchUI(on);
-        toastMsg(on ? "已开启拟人点击：完整一题勾选约 5–6 分钟" : "已关闭拟人点击（瞬时点完）");
+        toastMsg(on ? `已开启拟人点击：完整一题约 ${formatHumanDuration(_humanDurationCached || "4-6")}` : "已关闭拟人点击（瞬时点完）");
         log("拟人点击=" + (on ? "开" : "关"));
         return;
       }
