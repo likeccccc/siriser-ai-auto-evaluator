@@ -36,9 +36,9 @@
         const transient = e.networkFailure || e.name === "AbortError" ||
           /failed to fetch|networkerror|network error|load failed|timeout|timed out|超时/i.test(String(e.message));
         if (!transient || e.fatal) throw e;
-        if (attempt >= 2) {
+        if (attempt >= 1) {
           e.channelFailure = true;
-          slog(`${label} 网络重试2次仍失败 → 标记 missing，继续后续任务`, "err");
+          slog(`${label} 网络重试仍失败 → 标记 missing，继续后续任务（首轮后统一补一次）`, "err");
           throw e;
         }
         const delay = (attempt + 1) * 5000;
@@ -548,7 +548,8 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       Authorization: `Bearer ${cfg.OPENAI_API_KEY}`,
     };
     const minTimeout = requestRole === "review" ? 10000 : 60000;
-    const timeout = Math.max(minTimeout, Number(cfg.TIMEOUT_MS) || 300000);
+    // 超时上限压到 120s：卡住的候选更快标 missing、交给首轮后统一补评，不再长时间空等
+    const timeout = Math.min(120000, Math.max(minTimeout, Number(cfg.TIMEOUT_MS) || 300000));
 
     slog(
       `请求 ${models.map((m) => m.id).join(",")} model=${modelName} 超时=${(timeout / 1000).toFixed(0)}s`
@@ -585,18 +586,18 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
         (finishReason ? ` finish=${finishReason}` : "")
     );
     if (isQwen3Family && !thinkingEnabled && reasoningTokens > 0) {
-      const err = new Error(
-        `成本保护触发：${modelName} 仍产生 ${reasoningTokens} 个思考 token，已停止后续评分。`
+      // 成本提示（不再致命中断）：继续用本次结果评分，避免因偶发思考 token 停掉整题
+      slog(
+        `成本提示（不中断）：${modelName} 产生 ${reasoningTokens} 个思考 token，继续评分`,
+        "err"
       );
-      err.fatal = true;
-      throw err;
     }
     if (finishReason === "length") {
-      const err = new Error(
-        `成本保护触发：${modelName} 输出达到 ${outputLimit} token 上限，已停止，避免继续重试耗费。`
+      // 输出撞上限（不再致命中断）：按已返回内容继续，缺的交给 missing/补评处理
+      slog(
+        `成本提示（不中断）：${modelName} 输出达 ${outputLimit} token 上限，按已返回内容继续`,
+        "err"
       );
-      err.fatal = true;
-      throw err;
     }
     const text = data.choices?.[0]?.message?.content || "{}";
     const parsed = safeJson(text);

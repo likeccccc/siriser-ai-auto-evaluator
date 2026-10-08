@@ -241,6 +241,6 @@ test("later workbench ID promotes a pending record and partial model ratings mer
 
 test("manifest grants automatic local workbook downloads and extension version is bumped", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(extensionDir, "manifest.json"), "utf8"));
-  assert.equal(manifest.version, "1.0.52");
+  assert.equal(manifest.version, "1.0.55");
   assert.ok(manifest.permissions.includes("downloads"));
 });
