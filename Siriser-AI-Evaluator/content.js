@@ -1944,6 +1944,89 @@
     };
   }
 
+  /** 维度中文名（与导出工作簿表头一致） */
+  const EXTREME_DIM_LABELS = {
+    alignment: "指令遵循",
+    quality: "局部质量",
+    preservation: "非编辑区保持",
+    consistency: "全局一致",
+    realism: "真实感与美学",
+  };
+
+  /** 已提醒过的「题目+维度+分值+个数」组合，避免同一题重复刷屏 */
+  const _extremeReviewSent = new Set();
+
+  /**
+   * 只读统计：每个维度上打 1 / 打 10 的模型各有几个。
+   * 不修改任何分数，也不参与填表与提交流程。
+   */
+  function detectExtremeScoreClusters(record, minCount) {
+    const scores = (record && record.scores) || [];
+    const hits = [];
+    DIMS.forEach(function (dim) {
+      const scored = scores.filter(function (score) {
+        const value = score && score[dim];
+        return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+      });
+      [1, 10].forEach(function (extreme) {
+        const same = scored.filter(function (score) { return Number(score[dim]) === extreme; });
+        if (same.length < minCount) return;
+        hits.push({
+          dim: dim,
+          label: EXTREME_DIM_LABELS[dim] || dim,
+          value: extreme,
+          count: same.length,
+          total: scored.length,
+          models: same.map(function (score) { return String(score.modelName || score.modelId || "?"); }),
+          // 机器重判过的模型理由里带这个标记；仍扎堆说明复核没能纠正，需人工
+          reReviewed: same.some(function (score) {
+            return String((score && score.reason) || "").indexOf("已整列极端复核") >= 0;
+          }),
+        });
+      });
+    });
+    return hits;
+  }
+
+  /** 命中后推钉钉复核提醒；任何失败只记日志，绝不影响自动跑题 */
+  async function maybeNotifyExtremeScores(record) {
+    try {
+      const cfg = (CFG && CFG.EXTREME_REVIEW) || {};
+      if (cfg.ON === false) return false;
+      const minCount = Number.isFinite(Number(cfg.MIN_COUNT)) && Number(cfg.MIN_COUNT) > 0
+        ? Number(cfg.MIN_COUNT)
+        : 6;
+      const hits = detectExtremeScoreClusters(record, minCount);
+      if (!hits.length) return false;
+      const fresh = hits.filter(function (hit) {
+        const key = `${(record && record.recordKey) || "na"}|${hit.dim}|${hit.value}|${hit.count}`;
+        if (_extremeReviewSent.has(key)) return false;
+        _extremeReviewSent.add(key);
+        return true;
+      });
+      if (!fresh.length) return false;
+      const lines = fresh.map(function (hit) {
+        const names = hit.models.slice(0, 14).join("、")
+          + (hit.models.length > 14 ? `…共 ${hit.models.length} 个` : "");
+        return `· ${hit.label}：${hit.count}/${hit.total} 个模型都打了 ${hit.value}${
+          hit.reReviewed ? "（机器复核后仍未纠正）" : ""
+        }（${names}）`;
+      });
+      const anyReviewed = fresh.some(function (hit) { return hit.reReviewed; });
+      const text = [
+        `题目ID：${(record && record.taskId) || "待补"}｜本题模型数：${((record && record.scores) || []).length}`,
+        anyReviewed
+          ? `以下维度机器已重判但仍整列同分（阈值 ≥${minCount} 个模型），需要人工复核：`
+          : `以下维度整列同分（阈值 ≥${minCount} 个模型），现实中小概率，建议人工复核后再提交：`,
+      ].concat(lines).join("\n");
+      log(`检测到 ${fresh.length} 处极端分扎堆，推送复核提醒`, "err");
+      return await notifyDingTalk(text, "【Siriser 复核提醒】", { includePage: false });
+    } catch (e) {
+      log("极端分复核提醒失败：" + ((e && e.message) || e), "err");
+      return false;
+    }
+  }
+
   function wakeImageLoading(issues) {
     (issues || []).forEach((m) => {
       const img = m && m.imgEl;
@@ -2284,6 +2367,7 @@
     } else {
       log(`评分完成，但本地台账保存失败：${(saveResult && saveResult.error) || "后台无响应"}`, "err");
     }
+    await maybeNotifyExtremeScores(record);
     log("完成 · 用时 " + fmtDur(Date.now() - t0), "ok");
     setStatusDock("本题完成", `用时 ${fmtDur(Date.now() - t0)}`, "ok");
     beepDone();
