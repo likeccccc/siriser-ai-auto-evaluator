@@ -1015,6 +1015,9 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
   async function applyExtremeClusterReview(cleanTask, scores, cfg) {
     const er = (cfg && cfg.EXTREME_REVIEW) || {};
     if (er.ON === false) return scores;
+    // 成本闸门：机器重判每题最多多 10 次视觉调用，且纠偏效果未经验证，默认一律不调用，
+    // 检出即由页面侧卡住提交转人工。只有显式 RESCORE: true 才会额外请求。
+    if (er.RESCORE !== true) return scores;
     const minCount = Math.max(2, Number(er.MIN_COUNT) || 6);
     const hit = pickExtremeClusterReview(scores, minCount);
     if (!hit.length) return scores;

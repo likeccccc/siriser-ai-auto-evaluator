@@ -2028,17 +2028,21 @@
 
       const anyReviewed = fresh.some(function (hit) { return hit.reReviewed; });
       const holdSubmit = cfg.HOLD_SUBMIT !== false;
+      const rescore = cfg.RESCORE === true;
       const lines = fresh.map(function (hit) {
         const names = hit.models.slice(0, 14).join("、")
           + (hit.models.length > 14 ? `…共 ${hit.models.length} 个` : "");
         return `· ${hit.label}：${hit.count}/${hit.total} 个模型都打了 ${hit.value}（${names}）`;
       });
+      const header = anyReviewed
+        ? `以下维度机器重判后仍整列同分（阈值 ≥${minCount} 个模型）：`
+        : rescore
+          ? `以下维度整列同分（阈值 ≥${minCount} 个模型），现实中小概率：`
+          : `以下维度整列同分（阈值 ≥${minCount} 个模型）。为省调用未做机器重判，直接转人工：`;
       const text = [
         "题目ID：" + (taskId || "获取失败：" + idError.slice(0, 80)),
         `本题模型数：${((record && record.scores) || []).length}`,
-        anyReviewed
-          ? `以下维度机器重判后仍整列同分（阈值 ≥${minCount} 个模型）：`
-          : `以下维度整列同分（阈值 ≥${minCount} 个模型），现实中小概率：`,
+        header,
       ]
         .concat(lines)
         .concat([
