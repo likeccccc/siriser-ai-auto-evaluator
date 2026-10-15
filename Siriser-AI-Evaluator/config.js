@@ -58,6 +58,8 @@ window.SIRISER_CONFIG = {
    * MIN_COUNT：同一维度同一极端分（1 或 10）至少几个模型才算扎堆（绝对数）。
    * MAX_MODELS：单包最多重判几个模型（控成本与耗时；命中更多时只重判前 N 个）。
    * BUDGET_MS：本环节重判的总时间预算，超时未审的模型保留原分并在理由里标注。
+   * HOLD_SUBMIT：机器重判后仍扎堆时，true=本题不提交、停自动等人工复核（默认）；
+   *             false=照常提交，只发提醒供事后回看。
    * 注意：机器重判会改变最终分数；未配置「审核模型」时无法重判，只在理由里标注。
    */
   EXTREME_REVIEW: {
@@ -65,6 +67,7 @@ window.SIRISER_CONFIG = {
     MIN_COUNT: 6,
     MAX_MODELS: 10,
     BUDGET_MS: 240000,
+    HOLD_SUBMIT: true,
   },
   /** 单次 API 超时（ms）。通义偶发很慢，给到 5 分钟 */
   TIMEOUT_MS: 300000,
