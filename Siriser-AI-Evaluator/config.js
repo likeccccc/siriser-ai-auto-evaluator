@@ -50,6 +50,24 @@ window.SIRISER_CONFIG = {
    * 异常时 POST 文本消息；留空则不推送
    */
   DINGTALK_WEBHOOK: "",
+  /**
+   * 极端分扎堆两级复核（默认已关闭机器重判，只保留卡题+提醒）
+   * 一个任务里 10~18 个模型，某个维度整列同为 1 或同为 10 在现实中是小概率事件。
+   * ON：总开关。
+   * RESCORE：是否交审核模型重判。默认 false——每题最多多 10 次视觉调用，
+   *          而纠偏效果未经验证，不值得花公司的钱；只有显式写 true 才发起额外请求。
+   * MIN_COUNT：同一维度同一极端分（1 或 10）至少几个模型才算扎堆（绝对数）。
+   * MAX_MODELS / BUDGET_MS：仅 RESCORE=true 时生效（重判个数与时间预算）。
+   * HOLD_SUBMIT：true=命中即本题不提交、停自动等人工复核（默认）；false=照常提交只提醒。
+   */
+  EXTREME_REVIEW: {
+    ON: true,
+    RESCORE: false,
+    MIN_COUNT: 6,
+    MAX_MODELS: 10,
+    BUDGET_MS: 240000,
+    HOLD_SUBMIT: true,
+  },
   /** 单次 API 超时（ms）。通义偶发很慢，给到 5 分钟 */
   TIMEOUT_MS: 300000,
 
