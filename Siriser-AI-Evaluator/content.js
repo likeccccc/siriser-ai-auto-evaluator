@@ -2830,9 +2830,65 @@
     };
   }
 
+  /**
+   * 返修题检测：页面上存在「质检员反馈/审核意见/返修原因」类内容时返回其文本，否则 null。
+   * 只在开评前调用一次；命中后本题不走自动评分，停自动并推钉钉转人工。
+   */
+  function findQcFeedback() {
+    try {
+      const labelRes = findTextLabels(
+        /(质检|反馈意见|审核意见|返修原因|驳回原因|整改意见|批注)/,
+        document.body
+      );
+      for (const { el } of labelRes) {
+        // 找标签附近的实质内容：父容器内的长文本或紧邻兄弟节点
+        const scopes = [
+          el.parentElement,
+          el.parentElement && el.parentElement.parentElement,
+          el.nextElementSibling,
+        ].filter(Boolean);
+        for (const scope of scopes) {
+          const texts = qa("div,p,span,pre,textarea,[contenteditable],li,blockquote", scope)
+            .map(textOf)
+            .filter(
+              (t) =>
+                t && t.length >= 6 && t.length <= 500 &&
+                !/编辑指令遵循|评分细则|提交当前题|提交并下一题/.test(t)
+            );
+          if (texts.length) {
+            texts.sort((a, b) => b.length - a.length);
+            return { label: textOf(el).slice(0, 20), content: texts[0].slice(0, 200) };
+          }
+        }
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   async function autoOneTask(gen) {
     const myGen = gen == null ? _autoGen : gen;
     await clearStoredCountdown();
+
+    // 返修题：页面上有质检员反馈意见 → 不自动评分，停自动并推钉钉转人工
+    const qc = findQcFeedback();
+    if (qc) {
+      const packageIdResult = await notifyImageIssueTaskId();
+      const packageIdLine = packageIdResult && packageIdResult.ok
+        ? `题目ID：${packageIdResult.taskId}`
+        : `题目ID获取失败：${String((packageIdResult && packageIdResult.error) || "未知原因")}`;
+      log(`检测到质检反馈（${qc.label}），本题不自动评分，转人工`, "err");
+      setStatusDock("已暂停 · 质检反馈", `${qc.label} · 待人工处理`, "err");
+      toastMsg("本题为返修题（含质检反馈），自动已停止，请人工核对后提交");
+      await notifyDingTalk(
+        `检测到质检员反馈意见，本题为返修题，已停止自动评分。\n${packageIdLine}\n反馈标签：${qc.label}\n反馈内容：${qc.content}`,
+        "【Siriser 质检反馈】"
+      );
+      await stopAuto(`质检反馈待人工处理（本题未评分未提交）`, { silent: true });
+      return false;
+    }
+
     // 新任务包：5 秒全屏倒计时后再开评（可取消）
     const go = await countdownBeforeScore(5, "评分");
     if (!go || _autoGen !== myGen) {
