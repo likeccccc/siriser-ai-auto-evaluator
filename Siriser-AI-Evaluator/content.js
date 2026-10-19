@@ -2831,13 +2831,42 @@
   }
 
   /**
-   * 返修题检测：页面上存在「质检员反馈/审核意见/返修原因」类内容时返回其文本，否则 null。
+   * 返修题检测：命中以下任一信号即视为返修题，返回 {label, content}，否则 null。
+   * ① 右上角「返修沟通」按钮（红色，返修题最可靠的标志）
+   * ② 顶部 ⚠ 警告文案（如「⚠ B编辑局部质量偏低；模型-C非编辑区域保持偏高；」）
+   * ③ 页面存在「质检/反馈意见/审核意见/返修原因/驳回原因/整改意见」标签及附近实质内容
    * 只在开评前调用一次；命中后本题不走自动评分，停自动并推钉钉转人工。
    */
   function findQcFeedback() {
     try {
+      // ① 「返修沟通」按钮：返修题页面右上角固定出现
+      const revisionBtn = findTextButton(/返修沟通|返修/);
+      if (revisionBtn) {
+        // 同时抓 ⚠ 警告文案（通常在按钮附近）作为反馈内容
+        let warn = "";
+        const warnEls = qa("div,span,p")
+          .map(textOf)
+          .filter((t) => t && /^[⚠!！]/.test(t) && /(偏低|偏高|错误|不符|问题)/.test(t));
+        if (warnEls.length) warn = warnEls.sort((a, b) => b.length - a.length)[0];
+        return {
+          label: textOf(revisionBtn).slice(0, 20),
+          content: warn ? warn.slice(0, 200) : "返修沟通入口存在（未解析到具体警告文案）",
+        };
+      }
+
+      // ② 独立 ⚠ 警告文案（无返修按钮时兜底）
+      const warnOnly = qa("div,span,p")
+        .map(textOf)
+        .filter((t) => t && t.length >= 8 && t.length <= 300 &&
+          /^[⚠!！]/.test(t) && /(偏低|偏高|错误|不符|问题|不一致)/.test(t));
+      if (warnOnly.length) {
+        const w = warnOnly.sort((a, b) => b.length - a.length)[0];
+        return { label: "警告文案", content: w.slice(0, 200) };
+      }
+
+      // ③ 质检/审核意见类文本标签 + 附近实质内容
       const labelRes = findTextLabels(
-        /(质检|反馈意见|审核意见|返修原因|驳回原因|整改意见|批注)/,
+        /(质检员|质检结果|反馈意见|审核意见|返修原因|驳回原因|整改意见)/,
         document.body
       );
       for (const { el } of labelRes) {
