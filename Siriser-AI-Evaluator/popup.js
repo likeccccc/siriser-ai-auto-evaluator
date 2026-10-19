@@ -203,11 +203,30 @@ $("btnSave").addEventListener("click", async () => {
   }
 });
 
-/** 导出配置 JSON（含 Key，便于移除扩展后恢复） */
+/** 导出配置 JSON：默认剥离 API Key 等敏感字段；要带 Key 必须显式确认（防分享泄露） */
 $("btnExportCfg").addEventListener("click", async () => {
   try {
     const cfg = await loadConfig();
-    const blob = new Blob([JSON.stringify(cfg, null, 2)], {
+    const SENSITIVE = ["OPENAI_API_KEY", "API_KEY", "DINGTALK_WEBHOOK"];
+    const hasSecret = SENSITIVE.some((k) => cfg[k] && String(cfg[k]).trim());
+    let out = cfg;
+    let label = "配置已导出（已剥离 Key，可安全分享）";
+    if (hasSecret) {
+      const withKey = confirm(
+        "导出配置默认不包含 API Key / 钉钉 Webhook（安全，可分享）。\n\n" +
+          "点「确定」= 剥离后导出（推荐）；\n" +
+          "点「取消」= 仍要包含 Key（仅限自己备份，切勿发给他人）。"
+      );
+      if (withKey) {
+        out = { ...cfg };
+        SENSITIVE.forEach((k) => {
+          if (out[k]) out[k] = "";
+        });
+      } else {
+        label = "配置已导出（含 Key，仅供本人备份，勿分享）";
+      }
+    }
+    const blob = new Blob([JSON.stringify(out, null, 2)], {
       type: "application/json",
     });
     const a = document.createElement("a");
@@ -215,7 +234,7 @@ $("btnExportCfg").addEventListener("click", async () => {
     a.download = "siriser-evaluator-config.json";
     a.click();
     URL.revokeObjectURL(a.href);
-    setStatus("配置已导出", "ok");
+    setStatus(label, "ok");
   } catch (e) {
     setStatus("导出失败：" + e.message, "err");
   }
