@@ -237,7 +237,7 @@
     let node;
     while ((node = walker.nextNode())) {
       const el = node.parentElement;
-      if (!el || !visible(el)) continue;
+      if (!el || !visible(el) || el.closest?.('#siriser-root,#siriser-repair-root,#siriser-result,#siriser-diag')) continue;
       hits.push({ raw: node.nodeValue.trim(), el });
     }
     return hits;
@@ -970,6 +970,7 @@
       "div,span,p,td,th,label,legend,h1,h2,h3,h4,h5,h6,section,li",
       root
     )
+      .filter((el) => !el.closest?.('#siriser-root,#siriser-repair-root,#siriser-result,#siriser-diag'))
       .filter((el) => {
         const t = textOf(el);
         return t && t.length <= 80 && !!dimKeyFromText(t) && visible(el);
@@ -1588,6 +1589,12 @@
       .find((b) => re.test(textOf(b) || b.value || ""));
   }
 
+  function findSiteButton(re) {
+    return qa('button,[role="button"],a.btn,input[type="submit"]')
+      .filter((el) => visible(el) && !el.closest('#siriser-root,#siriser-repair-root,#siriser-result,#siriser-diag'))
+      .find((el) => re.test(textOf(el) || el.value || ''));
+  }
+
   let _lastSubmitAt = 0;
   function submitAndNext() {
     const now = Date.now();
@@ -1617,6 +1624,42 @@
       log("未找到提交按钮", "err");
     }
     return !!btn;
+  }
+
+  function repairSubmitConfirmed(taskUrl) {
+    if (location.href !== taskUrl) return true;
+    const notices = qa('[role="alert"], .ant-message-notice, .ant-notification-notice, .ant-modal-confirm, .ant-modal-body')
+      .filter(visible).map(textOf);
+    return notices.some((text) => /提交成功|提交完成|提交题目成功/.test(text));
+  }
+
+  async function submitRepairTask() {
+    const autoClaimLabel = qa('label, .ant-checkbox-wrapper').filter(visible)
+      .find((el) => /提交后自动领取下一题|自动领取下一题/.test(textOf(el)));
+    const autoClaimInput = autoClaimLabel?.querySelector('input[type="checkbox"]');
+    if (autoClaimInput?.checked) {
+      fireClick(autoClaimLabel);
+      await sleep(450);
+      if (autoClaimInput.checked) {
+        log("返修提交前无法关闭自动领取，停止提交", "err");
+        return false;
+      }
+    }
+    const btn = findSiteButton(/^(提交当前题|提交)$/);
+    if (!btn) {
+      log("返修页未找到『提交当前题』，停止提交", "err");
+      return false;
+    }
+    const taskUrl = location.href;
+    const repair = await loadRepairState();
+    await saveRepairState({ ...repair, phase: "submitting", taskUrl, submittedAt: Date.now() });
+    btn.click();
+    for (let i = 0; i < 30; i++) {
+      if (repairSubmitConfirmed(taskUrl)) return true;
+      await sleep(500);
+    }
+    log("返修提交后未见成功提示或页面跳转，留在本题核对", "err");
+    return false;
   }
 
   function readPrompt() {
@@ -2367,6 +2410,9 @@
     });
 
     scores = applyRequestedAspectPolicy(scores, task, modelsToEval);
+    if (opts && Array.isArray(opts.repairCorrections) && opts.repairCorrections.length) {
+      scores = applyRepairCorrections(scores, opts.repairCorrections);
+    }
 
     await applyScores(scores, {
       elapsedMs: Date.now() - t0,
@@ -2416,7 +2462,10 @@
 
   // ── 全自动模式 ──
   const AUTO_KEY = "SIRISER_AUTO";
+  const REPAIR_KEY = "SIRISER_REPAIR_QUEUE";
+  const REPAIR_TAB_TOKEN_KEY = "SIRISER_REPAIR_TAB_TOKEN";
   let _autoRunning = false;
+  let _repairRunning = false;
   let _cancelSubmit = false;
   let _autoGen = 0;
   let _firstTaskDone = false;
@@ -2431,9 +2480,110 @@
     });
   }
   function saveAutoState(st) {
+    return new Promise((resolve) => {
+      try { chrome.storage.local.set({ [AUTO_KEY]: st }, resolve); }
+      catch (_) { resolve(); }
+    });
+  }
+
+  function loadRepairState() {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get([REPAIR_KEY], (r) => resolve(r[REPAIR_KEY] || { on: false }));
+      } catch (_) { resolve({ on: false }); }
+    });
+  }
+  function saveRepairState(st) {
+    return new Promise((resolve) => {
+      try { chrome.storage.local.set({ [REPAIR_KEY]: st }, resolve); }
+      catch (_) { resolve(); }
+    });
+  }
+  async function repairOwnerIdentity() {
+    // sessionStorage 属于当前标签页，且同站页面跳转后仍在；后台休眠时也能识别原标签。
     try {
-      chrome.storage.local.set({ [AUTO_KEY]: st });
-    } catch (_) {}
+      let token = sessionStorage.getItem(REPAIR_TAB_TOKEN_KEY);
+      if (!token) {
+        token = globalThis.crypto && typeof globalThis.crypto.randomUUID === "function"
+          ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+        sessionStorage.setItem(REPAIR_TAB_TOKEN_KEY, token);
+      }
+      return `session:${token}`;
+    } catch (_) {
+      // 仅在浏览器禁用 sessionStorage 时，才向扩展后台索取标签 ID。
+      const tab = await sendRuntimeMsg({ type: "SIRISER_TAB_ID" });
+      return tab && tab.ok && Number.isInteger(tab.tabId) ? `tab:${tab.tabId}` : null;
+    }
+  }
+  function isLabelingTaskPage() {
+    return /\/siriser\/labeling\/task\b/i.test(location.pathname);
+  }
+  function repairRows() {
+    return qa("tr").filter((row) => visible(row) && /被驳回/.test(textOf(row)));
+  }
+  async function ensureRecentRepairList() {
+    const tab = qa('[role="tab"], .ant-tabs-tab').filter(visible)
+      .find((el) => /^最近\s*\(\d+\)/.test(textOf(el)));
+    if (tab && tab.getAttribute('aria-selected') !== 'true' && !tab.classList.contains('ant-tabs-tab-active')) {
+      tab.click();
+      await sleep(500);
+    }
+  }
+  function repairRowKey(row, index) {
+    const key = row.getAttribute("data-row-key") || row.querySelector("[data-row-key]")?.getAttribute("data-row-key");
+    const link = row.querySelector('a[href*="labeling/task"]')?.href;
+    return String(key || link || `${index}:${textOf(row).replace(/\s+/g, " ").slice(0, 500)}`);
+  }
+  function findRepairCandidate(processed) {
+    const done = new Set(processed || []);
+    return repairRows().map((row, index) => ({
+      row, key: repairRowKey(row, index),
+      button: (() => {
+        const direct = qa("a,button,[role=button]", row).find((el) => /^去修改$/.test(textOf(el)));
+        if (direct) return direct;
+        const table = row.closest('.ant-table-wrapper') || row.closest('.ant-table') || document;
+        const statusRows = qa('tbody tr', row.closest('table') || table);
+        const rowIndex = statusRows.indexOf(row);
+        const fixedRows = qa('.ant-table-fixed-right tbody tr', table);
+        const rowKey = row.getAttribute('data-row-key');
+        const paired = (rowKey && qa('tr', table).find((other) => other !== row && other.getAttribute('data-row-key') === rowKey &&
+          qa('a,button,[role=button]', other).some((el) => /^去修改$/.test(textOf(el))))) || fixedRows[rowIndex];
+        return paired && qa("a,button,[role=button]", paired).find((el) => /^去修改$/.test(textOf(el)));
+      })(),
+    })).find((item) => item.button && !done.has(item.key)) || null;
+  }
+
+  function nextRepairPageButton() {
+    const host = qa('.ant-pagination-next, [aria-label="Next Page"], [aria-label="下一页"]')
+      .find((el) => visible(el) && !el.classList.contains('ant-pagination-disabled') && el.getAttribute('aria-disabled') !== 'true');
+    return host && (host.querySelector('button,a') || host);
+  }
+  function repairPageSignature() {
+    return qa('tbody tr').map((row) => `${row.getAttribute('data-row-key') || ''}:${textOf(row)}`).join('|');
+  }
+  async function selectRepairCandidate(processed) {
+    for (let page = 0; page < 200; page++) {
+      for (let i = 0; i < 30 && !qa('tbody tr').length && !/暂无数据|暂无项目/.test(textOf(document.body)); i++) await sleep(500);
+      if (!qa('tbody tr').length && !/暂无数据|暂无项目/.test(textOf(document.body))) {
+        throw new Error('返修列表尚未加载，已停止以免漏过本页');
+      }
+      setStatusDock("返修队列", `扫描列表第 ${page + 1} 页`);
+      const candidate = findRepairCandidate(processed);
+      if (candidate) return candidate;
+      const next = nextRepairPageButton();
+      if (!next) return null;
+      const before = repairPageSignature();
+      const pageBefore = textOf(q('.ant-pagination-item-active'));
+      next.click();
+      let changed = false;
+      for (let i = 0; i < 40; i++) {
+        await sleep(250);
+        if (textOf(q('.ant-pagination-item-active')) !== pageBefore && repairPageSignature() !== before &&
+            !qa('.ant-table-wrapper .ant-spin-spinning').some(visible)) { changed = true; break; }
+      }
+      if (!changed) throw new Error('翻页后列表未变化，已停止返修队列');
+    }
+    throw new Error('已检查前 200 页；还有返修题时请从后续页面重新启动');
   }
 
   // ── 定时自动停止：独立 storage key，避免被 saveAutoState 整块覆盖冲掉，且跨刷新保留 ──
@@ -2709,7 +2859,7 @@
     _autoGen += 1;
     _autoRunning = false;
     _cancelSubmit = false;
-    saveAutoState({ on: false, phase: "off", submitAt: null, reason: reason || "stopped", at: Date.now() });
+    await saveAutoState({ on: false, phase: "off", submitAt: null, reason: reason || "stopped", at: Date.now() });
     clearSessionDeadline();
     _schedStopAt = 0;
     log("全自动停止：" + (reason || ""));
@@ -2896,26 +3046,233 @@
     }
   }
 
-  async function autoOneTask(gen) {
+  function parseRepairFeedback(text) {
+    const source = String(text || "").replace(/[\r\n]+/g, "、");
+    const marker = /模型\s*[-—–:]?\s*([A-S])\b/gi;
+    const hits = [];
+    let m;
+    while ((m = marker.exec(source))) hits.push({ id: m[1].toUpperCase(), at: m.index, end: marker.lastIndex });
+    const dims = [
+      ["alignment", /编辑指令遵循|指令遵循/], ["quality", /编辑局部质量|局部质量/],
+      ["preservation", /非编辑区域保持|非编辑区保持|内容保持/], ["consistency", /全局一致性/],
+      ["realism", /视觉真实感与美学|真实感与美学/],
+    ];
+    const out = [];
+    for (let i = 0; i < hits.length; i++) {
+      let part = source.slice(hits[i].end, hits[i + 1] ? hits[i + 1].at : source.length);
+      const ids = [hits[i].id];
+      // 「模型-B、E、F、R编辑指令遵循偏低」：后续字母与 B 共用同一条意见。
+      // 只在评分项之前、且由列表分隔符连接时认作模型编号，避免误读正文中的字母。
+      for (;;) {
+        const next = part.match(/^\s*[、,，/]\s*([A-S])(?=\s*(?:[、,，/;；]|编辑|指令|非编辑|内容|全局|视觉|真实))/i);
+        if (!next) break;
+        ids.push(next[1].toUpperCase());
+        part = part.slice(next[0].length);
+      }
+      for (const [dim, re] of dims) {
+        const dm = part.match(re); if (!dm) continue;
+        const dir = part.slice(dm.index + dm[0].length, dm.index + dm[0].length + 24).match(/偏低|偏高/);
+        if (dir) for (const id of ids) out.push({ model: id, dim, direction: dir[0] });
+      }
+    }
+    return out.filter((v, i, a) => a.findIndex((x) => x.model === v.model && x.dim === v.dim) === i);
+  }
+
+  function findRepairDialogClose(dialog) {
+    const selector = 'button,[role="button"],.ant-drawer-close,.ant-modal-close,[aria-label]';
+    const dialogBox = dialog.getBoundingClientRect();
+    const isClose = (el) => {
+      if (!visible(el) || el.closest?.('#siriser-root,#siriser-repair-root,#siriser-result,#siriser-diag')) return false;
+      return /^\s*关闭\s*$/.test(textOf(el)) || /^(close|关闭)$/i.test(el.getAttribute?.('aria-label') || '') ||
+        el.classList?.contains('ant-drawer-close') || el.classList?.contains('ant-modal-close');
+    };
+    const nearDialog = (el) => {
+      const box = el.getBoundingClientRect();
+      return box.right > dialogBox.left && box.left < dialogBox.right + 100 &&
+        box.bottom > dialogBox.top - 180 && box.top < dialogBox.top + 180;
+    };
+    let scope = dialog;
+    for (let depth = 0; depth < 7 && scope; depth++, scope = scope.parentElement) {
+      const close = qa(selector, scope).filter(isClose).find(nearDialog);
+      if (close) return close;
+      if (scope === document.body) break;
+    }
+    // 有些站点把抽屉标题和内容渲染为兄弟节点，最后按右上角位置兜底。
+    const globalClose = qa(selector).filter(isClose).find((el) => {
+      const box = el.getBoundingClientRect();
+      return nearDialog(el) && box.left > window.innerWidth / 2 && box.top < window.innerHeight / 3;
+    });
+    if (globalClose) return globalClose;
+    // 自定义抽屉可能用普通 span/div 显示「关闭」，并非 button 或 role=button。
+    const closeText = findTextLabels(/^关闭$/, document.body)
+      .map(({ el }) => el)
+      .filter((el) => visible(el) && !el.closest?.('#siriser-root,#siriser-repair-root,#siriser-result,#siriser-diag'))
+      .filter((el) => {
+        const box = el.getBoundingClientRect();
+        return box.left > window.innerWidth / 2 && box.top >= 0 &&
+          box.top < window.innerHeight / 3 && box.width < 180 && box.height < 90;
+      })
+      .sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)[0];
+    if (closeText) {
+      log('返修关闭按钮：按右上角「关闭」文字定位', 'ok');
+      return closeText;
+    }
+    // 最后只尝试站点自己的可见遮罩；点击后仍必须验证弹窗确已关闭。
+    const mask = qa('.ant-drawer-mask,.ant-modal-mask,[class*="drawer-mask" i]')
+      .find((el) => visible(el) && el.getBoundingClientRect().width > window.innerWidth / 3);
+    if (mask) log('返修关闭按钮：尝试抽屉遮罩', 'err');
+    return mask || null;
+  }
+
+  async function readRepairCommunication(options) {
+    const assistOnly = !!(options && options.assistOnly);
+    const findOpenDialog = () => qa('[role="dialog"], .ant-modal, .ant-drawer, [class*="modal" i], [class*="drawer" i]')
+      .filter((el) => {
+        const box = el.getBoundingClientRect();
+        return visible(el) && el.getAttribute('aria-hidden') !== 'true' &&
+          box.right > 0 && box.left < window.innerWidth && box.bottom > 0 && box.top < window.innerHeight &&
+          /返修沟通/.test(textOf(el)) && /模型\s*[-—–:]?\s*[A-S]/i.test(textOf(el));
+      })
+      .sort((a, b) => textOf(a).length - textOf(b).length)[0] || null;
+    let dialog = findOpenDialog();
+    if (!dialog) {
+      const btn = findTextButton(/^\s*返修沟通/);
+      if (!btn) return { text: "", corrections: [] };
+      try { btn.click(); } catch (_) { return { text: "", corrections: [] }; }
+    }
+    for (let i = 0; i < 20 && !dialog; i++) {
+      await sleep(200);
+      dialog = findOpenDialog();
+    }
+    if (!dialog) throw new Error("返修沟通弹窗未加载，已停止以免盲目改分");
+    const text = textOf(dialog).slice(0, 6000);
+    const corrections = parseRepairFeedback(text);
+    const close = findRepairDialogClose(dialog);
+    if (!close) {
+      if (assistOnly) return { text, corrections, closeUnconfirmed: true };
+      throw new Error("返修沟通弹窗找不到关闭按钮，已停止以免遮挡评分");
+    }
+    // 关闭只发一次点击：通用 fireClick 会连续发原生及合成 click，可能把抽屉重新打开。
+    try { close.click(); } catch (_) { fireClick(close); }
+    for (let i = 0; i < 15; i++) {
+      await sleep(200);
+      const box = dialog.getBoundingClientRect();
+      const inViewport = box.right > 0 && box.left < window.innerWidth && box.bottom > 0 && box.top < window.innerHeight;
+      // 不能只凭关闭按钮消失判定成功：站点会先重绘标题按钮，抽屉仍可能盖在评分区。
+      if (!dialog.isConnected || !visible(dialog) || !inViewport ||
+          dialog.getAttribute('aria-hidden') === 'true') {
+        return { text, corrections };
+      }
+    }
+    // 辅助模式不改分、不提交；关窗状态误报不应丢失已经读到的质检意见。
+    // 自动返修仍必须确认抽屉关闭，避免在遮挡状态下盲点评分。
+    if (assistOnly) return { text, corrections, closeUnconfirmed: true };
+    throw new Error("返修沟通弹窗没有关闭，已停止以免遮挡评分");
+  }
+
+  // 返修意见是人工给出的方向，不再固定 ±1。按原分的极端程度回到人工常见区间。
+  // 超出适用区间时不猜分，留给人工确认；绝不把分数静默截到边界。
+  function repairAdjustedScore(before, direction) {
+    const score = Number(before);
+    if (!Number.isInteger(score) || score < 1 || score > 10) {
+      throw new Error(`返修原分无效：${before}`);
+    }
+    if (direction === '偏低') {
+      if (score > 5) throw new Error(`原分 ${score} 与“偏低”不符，需人工复核`);
+      return score + (score <= 3 ? 5 : score === 4 ? 4 : 3);
+    }
+    if (direction === '偏高') {
+      if (score < 6) throw new Error(`原分 ${score} 与“偏高”不符，需人工复核`);
+      return score - (score >= 9 ? 5 : score === 8 ? 4 : 3);
+    }
+    throw new Error(`无法识别返修方向：${direction}`);
+  }
+
+  function applyRepairCorrections(scores, corrections) {
+    const byModel = new Map((scores || []).map((s) => [String(s.model || "").toUpperCase(), s]));
+    const changes = [];
+    for (const c of corrections || []) {
+      const s = byModel.get(String(c.model || "").toUpperCase());
+      if (!s || !DIMS.includes(c.dim) || s[c.dim] == null) {
+        throw new Error(`模型 ${c.model} 的 ${c.dim} 无法读取原分，返修已停止`);
+      }
+      changes.push({ score: s, dim: c.dim, before: Number(s[c.dim]), after: repairAdjustedScore(s[c.dim], c.direction) });
+    }
+    changes.forEach(({ score, dim, after }) => { score[dim] = after; });
+    if (changes.length) log(`返修反馈已应用：${changes.length} 个指定维度按原分分段调整`, "ok");
+    return scores;
+  }
+
+  function selectedRepairScore(cell) {
+    const selected = Object.entries((cell && cell.options) || {}).filter(([, host]) => {
+      const input = host.tagName === 'INPUT' ? host : host.querySelector?.('input[type="radio"]');
+      return !!(input?.checked || host.getAttribute?.('aria-checked') === 'true' ||
+        host.classList?.contains('ant-radio-wrapper-checked'));
+    });
+    return selected.length === 1 && /^\d{1,2}$/.test(selected[0][0]) ? Number(selected[0][0]) : null;
+  }
+
+  async function applyRepairFeedbackToExistingScores(corrections) {
+    const { groups } = collectScoreGroups();
+    const changes = [];
+    for (const item of corrections) {
+      const cell = groups.get(item.model)?.[item.dim];
+      const before = selectedRepairScore(cell);
+      if (!cell || before == null || !['偏低', '偏高'].includes(item.direction)) {
+        throw new Error(`无法读取模型 ${item.model} 的 ${item.dim} 原评分，返修已停止`);
+      }
+      const after = repairAdjustedScore(before, item.direction);
+      if (!pickTargetEl(cell.options, after)) throw new Error(`模型 ${item.model} 的 ${item.dim} 缺少 ${after} 分选项`);
+      changes.push({ model: item.model, dim: item.dim, before, after });
+    }
+    for (const change of changes) {
+      const cell = collectScoreGroups().groups.get(change.model)?.[change.dim];
+      const target = cell && pickTargetEl(cell.options, change.after);
+      if (!target) throw new Error(`模型 ${change.model} 的 ${change.dim} 评分控件已变化，返修已停止`);
+      fireClick(target);
+      await sleep(250);
+      const current = selectedRepairScore(collectScoreGroups().groups.get(change.model)?.[change.dim]);
+      if (current !== change.after) throw new Error(`模型 ${change.model} 的 ${change.dim} 改分未生效，返修已停止`);
+      log(`返修改分 ${change.model} ${change.dim}: ${change.before}→${change.after}`, 'ok');
+    }
+    setStatusDock('返修改分完成', `只调整 ${changes.length} 个被指出的评分项`, 'ok');
+    return changes;
+  }
+
+  async function autoOneTask(gen, repairMode) {
     const myGen = gen == null ? _autoGen : gen;
     await clearStoredCountdown();
 
-    // 返修题：页面上有质检员反馈意见 → 不自动评分，停自动并推钉钉转人工
+    // 返修题：读取沟通弹窗；可解析时继续评分并对指定维度做保守修正。
     const qc = findQcFeedback();
-    if (qc) {
-      const packageIdResult = await notifyImageIssueTaskId();
-      const packageIdLine = packageIdResult && packageIdResult.ok
-        ? `题目ID：${packageIdResult.taskId}`
-        : `题目ID获取失败：${String((packageIdResult && packageIdResult.error) || "未知原因")}`;
-      log(`检测到质检反馈（${qc.label}），本题不自动评分，转人工`, "err");
-      setStatusDock("已暂停 · 质检反馈", `${qc.label} · 待人工处理`, "err");
-      toastMsg("本题为返修题（含质检反馈），自动已停止，请人工核对后提交");
-      await notifyDingTalk(
-        `检测到质检员反馈意见，本题为返修题，已停止自动评分。\n${packageIdLine}\n反馈标签：${qc.label}\n反馈内容：${qc.content}`,
-        "【Siriser 质检反馈】"
-      );
-      await stopAuto(`质检反馈待人工处理（本题未评分未提交）`, { silent: true });
+    let repairCorrections = [];
+    if (qc && !repairMode) {
+      await stopAuto('检测到返修意见；自动返修暂缓，请使用返修助手人工处理', { silent: true });
+      setStatusDock('等待人工返修', '请打开返修助手读取并定位意见', 'err');
       return false;
+    }
+    if (repairMode && !findTextButton(/^\s*返修沟通/)) {
+      await stopAuto("当前页不是返修题，已停止返修队列", { silent: true });
+      return false;
+    }
+    if (repairMode || qc) {
+      const repair = await readRepairCommunication();
+      repairCorrections = repair.corrections;
+      if (!repairCorrections.length) {
+        const packageIdResult = repairMode
+          ? { ok: false, error: "返修模式不切换当前答题标签" }
+          : await notifyImageIssueTaskId();
+        const packageIdLine = packageIdResult && packageIdResult.ok ? `题目ID：${packageIdResult.taskId}` : `题目ID获取失败：${String((packageIdResult && packageIdResult.error) || "未知原因")}`;
+        const feedbackLabel = qc?.label || "返修沟通";
+        log(`检测到质检反馈（${feedbackLabel}），未解析到可执行项，暂停转人工`, "err");
+        setStatusDock("已暂停 · 质检反馈", `${feedbackLabel} · 待人工处理`, "err");
+        toastMsg("返修意见未能自动解析，已暂停请人工核对");
+        await notifyDingTalk(`检测到质检员反馈意见，未解析到可执行修正，已暂停。\n${packageIdLine}\n答题页：${location.href}\n反馈内容：${qc?.content || repair.text || "返修沟通内容无法读取"}`, "【Siriser 质检反馈】");
+        await stopAuto(`质检反馈无法解析（本题未评分未提交）`, { silent: true });
+        return false;
+      }
+      log(`检测到返修沟通：解析 ${repairCorrections.length} 条修正，继续自动评分`, "ok");
+      setStatusDock("返修复核", `已解析 ${repairCorrections.length} 条，评分后调整`);
     }
 
     // 新任务包：5 秒全屏倒计时后再开评（可取消）
@@ -2932,8 +3289,10 @@
     const targetMs = randTotalMs();
     log(`本题目标总时长 ${fmtDur(targetMs)}（含评分+勾选+等待）`);
 
-    await waitImagesSafe(20000, { notifyOnTimeout: false });
-    await sleep(800);
+    if (!repairMode) {
+      await waitImagesSafe(20000, { notifyOnTimeout: false });
+      await sleep(800);
+    }
 
     // 清掉上一题（含手动跑题）可能残留的卡点标志，避免误卡本题
     _reviewHold = null;
@@ -2941,7 +3300,11 @@
     let missing = [];
     let retries = 0;
     try {
-      for (;;) {
+      if (repairMode) {
+        setStatusDock('按返修意见改分', `只修改 ${repairCorrections.length} 个指定评分项`);
+        scores = await applyRepairFeedbackToExistingScores(repairCorrections);
+      } else {
+        for (;;) {
         if (_autoGen !== myGen) return false;
         if (retries > 0) {
           await waitImagesSafe(10000, { notifyOnTimeout: false });
@@ -2950,6 +3313,7 @@
         scores = await runAutoScore(false, {
           batchSize: Number(CFG.AUTO_BATCH) || 3,
           autoMode: true,
+          repairCorrections,
         });
         missing = missingScoreIds(scores);
         if (!missing.length) {
@@ -2963,15 +3327,16 @@
           await stopAuto(`重评后仍缺分：${missing.join(",")}`);
           return false;
         }
-        await sleep(2500);
+          await sleep(2500);
+        }
       }
     } catch (e) {
-      // API/执行异常：整段停止，不再循环下一题（防死循环）
+      // API 或返修控件异常：整段停止，不再循环下一题（防死循环）
       clearCountdownInPanel();
-      log("API/执行异常，自动已停止：" + (e && e.message), "err");
-      toastMsg("API 异常，自动已停止，请改配置后再启动");
+      log((repairMode ? "返修改分异常" : "API/执行异常") + "，自动已停止：" + (e && e.message), "err");
+      toastMsg(repairMode ? "返修改分未完成，已暂停，请检查当前题" : "API 异常，自动已停止，请改配置后再启动");
       setStatusDock("已停止", shortErr((e && e.message) || ""), "err");
-      await stopAuto("API/执行异常：" + ((e && e.message) || "未知错误"));
+      await stopAuto((repairMode ? "返修改分异常：" : "API/执行异常：") + ((e && e.message) || "未知错误"));
       return false;
     }
 
@@ -3064,7 +3429,7 @@
       taskKey: null,
       batchSize: Number(CFG.AUTO_BATCH) || 3,
     });
-    const ok = await submitAutoForDeadline();
+    const ok = repairMode ? await submitRepairTask() : await submitAutoForDeadline();
     clearCountdownInPanel();
     // 未跳转则继续等 2s 跑下一题；已跳转则由加载页续跑
     saveAutoState({
@@ -3077,7 +3442,7 @@
     if (!ok) {
       log("全自动：提交按钮未找到", "err");
       setStatusDock("提交失败", "未找到提交按钮", "err");
-      await stopAuto("提交按钮未找到，未自动提交，请人工提交本题");
+      await stopAuto(repairMode ? "返修提交结果未确认，请核对当前题" : "提交按钮未找到，未自动提交，请人工提交本题");
       return false;
     }
     log(`全自动：已提交 · 总用时 ${fmtDur(Date.now() - t0)}`, "ok");
@@ -3100,6 +3465,182 @@
     return 6 * 60 * 1000 + Math.floor(Math.random() * 2 * 60 * 1000 + 1);
   }
   const TOTAL_HARD_CAP_MS = 15 * 60 * 1000;
+
+  const REPAIR_WORKBENCH_URL = "https://www.siriser.com/siriser/mine?";
+  async function stopRepairMode(reason) {
+    const state = await loadRepairState();
+    await saveRepairState({ ...state, on: false, phase: "off", reason, stoppedAt: Date.now() });
+    if ((await loadAutoState()).on) await stopAuto(reason, { silent: true });
+    setAutoSwitchUI(false);
+    setRepairButtonUI(false);
+    setStatusDock("返修模式已停止", reason);
+    toastMsg(reason);
+    log("返修模式停止：" + reason);
+  }
+
+  async function finishRepairTask(state) {
+    const processed = Array.isArray(state.processed) ? state.processed.slice() : [];
+    if (state.currentKey && !processed.includes(state.currentKey)) processed.push(state.currentKey);
+    const seenTaskUrls = Array.isArray(state.seenTaskUrls) ? state.seenTaskUrls.slice() : [];
+    if (state.taskUrl && !seenTaskUrls.includes(state.taskUrl)) seenTaskUrls.push(state.taskUrl);
+    const listUrl = state.listUrl || REPAIR_WORKBENCH_URL;
+    await saveRepairState({ ...state, phase: "list", currentKey: null, taskUrl: null,
+      processed, seenTaskUrls, completed: Number(state.completed || 0) + 1 });
+    await saveAutoState({ on: true, phase: "running", submitAt: null, taskKey: null,
+      batchSize: state.batchSize || 3 });
+    log(`返修题已提交，返回工作台；本轮已完成 ${processed.length} 题`, "ok");
+    setStatusDock("返修队列", `已完成 ${processed.length} 题，返回工作台`, "ok");
+    if (location.href !== listUrl) location.assign(listUrl);
+  }
+
+  async function resumeRepairCountdown(autoState) {
+    const keyNow = taskPromptKey();
+    if (!autoState.submitAt || (keyNow && autoState.taskKey && !autoState.taskKey.startsWith(keyNow))) {
+      throw new Error("返修倒计时与当前题不一致，已停止以免错交");
+    }
+    if (Date.now() - autoState.submitAt > 2 * 60 * 1000) {
+      throw new Error("返修提交倒计时已过期，需人工核对当前题");
+    }
+    while (Date.now() < autoState.submitAt) {
+      if (!(await loadRepairState()).on || !(await loadAutoState()).on) return false;
+      updateCountdownInPanel(`${fmtDur(autoState.submitAt - Date.now())} 后提交返修题`, false);
+      await sleep(1000);
+    }
+    updateCountdownInPanel("正在提交返修题…", true);
+    const ok = await submitRepairTask();
+    clearCountdownInPanel();
+    return ok;
+  }
+
+  async function repairLoop() {
+    if (_repairRunning) return;
+    _repairRunning = true;
+    try {
+      for (;;) {
+        const state = await loadRepairState();
+        if (!state.on) return;
+        const identity = await repairOwnerIdentity();
+        if (!identity || identity !== state.ownerIdentity) return;
+        const autoState = await loadAutoState();
+        if (!autoState.on) { await stopRepairMode("自动开关已关闭，返修队列停止"); return; }
+        const sess = await loadSessionDeadline();
+        if (sess && sess.endAt && Date.now() >= sess.endAt && state.phase !== "scoring" && autoState.phase !== "countdown") {
+          await stopRepairMode("定时到点，返修队列已停止");
+          await notifyScheduledStop(sess);
+          return;
+        }
+
+        if (isLabelingTaskPage()) {
+          if (!state.currentKey || !["opening", "scoring", "submitting"].includes(state.phase)) {
+            await stopRepairMode("当前答题页不属于返修队列，已停止自动处理");
+            return;
+          }
+          if (state.phase === "submitting") {
+            if (repairSubmitConfirmed(state.taskUrl || location.href)) {
+              await finishRepairTask(state);
+            } else {
+              await stopRepairMode("返修提交未确认，请核对当前题");
+            }
+            return;
+          }
+          if ((state.seenTaskUrls || []).includes(location.href)) {
+            await stopRepairMode("同一返修题再次出现，已停止以免重复提交");
+            return;
+          }
+          for (let i = 0; i < 30 && !findTextButton(/^\s*返修沟通/); i++) await sleep(500);
+          if (!findTextButton(/^\s*返修沟通/)) {
+            await stopRepairMode("当前答题页没有返修沟通入口，已停止以免处理普通题");
+            return;
+          }
+          if (autoState.phase === "countdown") {
+            const ok = await resumeRepairCountdown(autoState);
+            if (ok) await finishRepairTask(await loadRepairState());
+            else await stopRepairMode("返修倒计时已取消或提交失败");
+            return;
+          }
+          await saveRepairState({ ...state, phase: "scoring", taskUrl: location.href });
+          const myGen = ++_autoGen;
+          _autoRunning = true;
+          const ok = await autoOneTask(myGen, true);
+          _autoRunning = false;
+          if (ok) await finishRepairTask(await loadRepairState());
+          else await stopRepairMode("本题未完成，返修队列已暂停");
+          return;
+        }
+
+        if (location.pathname !== "/siriser/mine") {
+          if (state.listUrl && location.origin === new URL(state.listUrl).origin) {
+            location.assign(state.listUrl);
+            return;
+          }
+          await stopRepairMode("未进入 Siriser 工作台，返修队列已停止");
+          return;
+        }
+        if (state.phase === "submitting") {
+          await finishRepairTask(state);
+          continue;
+        }
+        await ensureRecentRepairList();
+        setStatusDock("返修队列", "查找被驳回的题目");
+        const candidate = await selectRepairCandidate(state.processed);
+        if (!candidate) {
+          await stopRepairMode(`工作台可见列表已无待返修题，本轮完成 ${state.completed || 0} 题`);
+          return;
+        }
+        await saveRepairState({ ...state, phase: "opening", currentKey: candidate.key });
+        log(`返修队列：打开被驳回任务 ${candidate.key.slice(0, 80)}`, "ok");
+        if (candidate.button.href && new URL(candidate.button.href, location.href).origin === location.origin &&
+            /\/siriser\/labeling\/task\b/i.test(new URL(candidate.button.href, location.href).pathname)) {
+          location.assign(candidate.button.href);
+        } else {
+          candidate.button.click();
+        }
+        for (let i = 0; i < 40; i++) {
+          if (isLabelingTaskPage()) break;
+          await sleep(500);
+        }
+        if (!isLabelingTaskPage()) {
+          await stopRepairMode("点击『去修改』后未进入答题页，已停止返修队列");
+          return;
+        }
+      }
+    } catch (error) {
+      await stopRepairMode("返修队列异常：" + String(error && error.message || error));
+    } finally {
+      _autoRunning = false;
+      _repairRunning = false;
+    }
+  }
+
+  async function startRepairMode() {
+    if (!/^https:\/\/(?:www\.)?siriser\.com$/i.test(location.origin) || location.pathname !== "/siriser/mine") {
+      toastMsg("请先打开『我的项目』返修列表，再启动返修模式");
+      return;
+    }
+    await loadConfigFromStorage();
+    if (!CFG.API_URL && !CFG.OPENAI_API_KEY) {
+      toastMsg("请先配置评分 API");
+      return;
+    }
+    const existingAuto = await loadAutoState();
+    if (existingAuto.on && (existingAuto.phase === "running" || existingAuto.phase === "countdown")) {
+      toastMsg("普通自动评分正在运行，请先停止后再启动返修模式");
+      return;
+    }
+    const batchSize = Math.max(1, Number(CFG.AUTO_BATCH) || 3);
+    const ownerIdentity = await repairOwnerIdentity();
+    if (!ownerIdentity) { toastMsg("无法确认当前标签，返修模式未启动"); return; }
+    await saveRepairState({ on: true, phase: "list", listUrl: location.href,
+      ownerIdentity, batchSize, processed: [], seenTaskUrls: [], completed: 0, startedAt: Date.now() });
+    await saveAutoState({ on: true, phase: "running", batchSize, startedAt: Date.now() });
+    const endAt = computeSessionEndAt(CFG);
+    if (endAt) saveSessionDeadline({ endAt, mode: "clock", label: stopLabelFor(CFG), setAt: Date.now() });
+    else clearSessionDeadline();
+    setAutoSwitchUI(true);
+    setRepairButtonUI(true);
+    toastMsg("返修模式已启动：逐条修改并提交后返回工作台");
+    await repairLoop();
+  }
 
   async function autoLoop() {
     if (_autoRunning) return;
@@ -3198,6 +3739,9 @@
     if (!on) {
       _autoRunning = false;
       clearSessionDeadline();
+      const repair = await loadRepairState();
+      if (repair.on) await saveRepairState({ ...repair, on: false, phase: "off", reason: "用户关闭自动模式" });
+      setRepairButtonUI(false);
     }
     log(on ? "自动模式=开（未启动，待点逐张/3张评）" : "自动模式=关");
   }
@@ -3539,6 +4083,8 @@
     collectScoreGroups,
     collectVisuals,
     structureDigest,
+    parseRepairFeedback,
+    applyRepairCorrections,
     dumpLogs,
   };
 
@@ -3626,6 +4172,218 @@
     const lb = document.getElementById("siriser-auto-label");
     if (sw) sw.classList.toggle("on", !!on);
     if (lb) lb.textContent = on ? "已开启自动模式" : "已关闭自动模式";
+  }
+
+  function setRepairButtonUI(on) {
+    const label = document.getElementById("siriser-auto-label");
+    if (label && on) label.textContent = "返修模式运行中";
+  }
+
+  const REPAIR_DIM_NAMES = {
+    alignment: '编辑指令遵循', quality: '编辑局部质量', preservation: '非编辑区域保持',
+    consistency: '全局一致性', realism: '视觉真实感与美学',
+  };
+  let _repairAssist = null;
+
+  function groupRepairCorrections(corrections) {
+    const grouped = new Map();
+    for (const item of corrections || []) {
+      if (!/^[A-S]$/.test(String(item.model || '')) || !DIMS.includes(item.dim)) continue;
+      if (!grouped.has(item.model)) grouped.set(item.model, []);
+      grouped.get(item.model).push(item);
+    }
+    return grouped;
+  }
+
+  function clearRepairAssistHints() {
+    qa('.sir-repair-hint').forEach((el) => el.remove());
+    qa('.sir-repair-target').forEach((el) => el.classList.remove('sir-repair-target'));
+  }
+
+  function repairScoreAnchor(cell) {
+    const options = cell && cell.options || {};
+    const host = options['1'] || Object.values(options)[0];
+    const sample = host?.tagName === 'INPUT' ? host.parentElement : host;
+    return cell?.header?.parentElement || sample?.parentElement || sample || null;
+  }
+
+  function showRepairAssistHints(corrections) {
+    clearRepairAssistHints();
+    const { groups } = collectScoreGroups();
+    const anchors = new Map();
+    for (const item of corrections || []) {
+      const cell = groups.get(item.model)?.[item.dim];
+      const anchor = repairScoreAnchor(cell);
+      if (!anchor) continue;
+      const current = selectedRepairScore(cell);
+      const hint = document.createElement('span');
+      hint.className = `sir-repair-hint ${item.direction === '偏高' ? 'sir-repair-high' : 'sir-repair-low'}`;
+      let reference = '';
+      if (current != null) {
+        try { reference = ` · 参考 ${repairAdjustedScore(current, item.direction)} 分`; }
+        catch (_) { reference = ' · 原分与意见不符，请核对'; }
+      }
+      hint.textContent = `${item.direction}${current == null ? ' · 原分未识别' : ` · 原 ${current} 分${reference}`}`;
+      hint.title = `模型 ${item.model} · ${REPAIR_DIM_NAMES[item.dim]} · ${item.direction}`;
+      anchor.appendChild(hint);
+      if (!anchors.has(item.model)) anchors.set(item.model, anchor);
+    }
+    return anchors;
+  }
+
+  // 只定位左侧 DOM，不调用 collectVisuals()，避免导航时重读/压缩整题图片。
+  function collectRepairImageAnchors(modelIds) {
+    const wanted = new Set(modelIds || []);
+    const anchors = new Map();
+    const { content } = getAreas();
+    const modelRe = HEU.modelLabel || /(?:模型|model)\s*[-–—_：: ]*\s*([A-Za-z0-9]{1,4})/i;
+    const labels = findTextLabels(modelRe, content);
+    for (const { raw, el: label } of labels.length ? labels : findTextLabels(modelRe, document.body)) {
+      const id = extractModelId(raw);
+      if (!wanted.has(id) || anchors.has(id)) continue;
+      let anchor = label;
+      let parent = label.parentElement;
+      for (let depth = 0; depth < 5 && parent; depth++, parent = parent.parentElement) {
+        // 懒加载图片尚无 naturalWidth 时也能定位到对应图片区，不要求先完成加载。
+        const images = qa('img', parent).filter((img) => {
+          if (isRealGenImg(img) || isBrokenModelImg(img)) return true;
+          const box = img.getBoundingClientRect();
+          return box.width >= 80 && box.height >= 80 && !/logo|icon|avatar|spinner/i.test(`${img.alt || ''} ${img.className || ''}`);
+        });
+        if (images.length === 1) { anchor = images[0]; break; }
+        if (images.length > 1) break;
+      }
+      anchors.set(id, anchor);
+    }
+    return anchors;
+  }
+
+  function jumpToRepairModel(id, state) {
+    let scoreAnchor = state.scoreAnchors.get(id);
+    if (!scoreAnchor?.isConnected) {
+      state.scoreAnchors = showRepairAssistHints(state.corrections);
+      scoreAnchor = state.scoreAnchors.get(id);
+    }
+    if (!scoreAnchor) return false;
+    qa('.sir-repair-target').forEach((el) => el.classList.remove('sir-repair-target'));
+    scoreAnchor.classList.add('sir-repair-target');
+    let imageAnchor = state.imageAnchors.get(id);
+    if (!imageAnchor?.isConnected) {
+      const refreshed = collectRepairImageAnchors([id]);
+      if (refreshed.has(id)) state.imageAnchors.set(id, refreshed.get(id));
+      imageAnchor = state.imageAnchors.get(id);
+    }
+    // 两栏各自独立滚动；instant 避免继承页面的 smooth 滚动样式。
+    const jumpNow = (el, block) => {
+      if (!el?.scrollIntoView) return;
+      try { el.scrollIntoView({ behavior: 'instant', block, inline: 'nearest' }); }
+      catch (_) { el.scrollIntoView({ behavior: 'auto', block, inline: 'nearest' }); }
+    };
+    jumpNow(imageAnchor, 'start');
+    jumpNow(scoreAnchor, 'center');
+    return true;
+  }
+
+  function bindRepairPanelDrag(root) {
+    const grip = root.querySelector('.sir-repair-grip');
+    let drag = null;
+    const place = (left, top) => {
+      const box = root.getBoundingClientRect();
+      root.style.left = `${Math.max(8, Math.min(left, window.innerWidth - box.width - 8))}px`;
+      root.style.top = `${Math.max(8, Math.min(top, window.innerHeight - box.height - 8))}px`;
+    };
+    grip.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || event.isPrimary === false) return;
+      const box = root.getBoundingClientRect();
+      drag = { id: event.pointerId, x: event.clientX, y: event.clientY, left: box.left, top: box.top };
+      grip.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+    grip.addEventListener('pointermove', (event) => {
+      if (drag?.id === event.pointerId) place(drag.left + event.clientX - drag.x, drag.top + event.clientY - drag.y);
+    });
+    const end = (event) => {
+      if (drag?.id !== event.pointerId) return;
+      drag = null;
+      if (grip.hasPointerCapture(event.pointerId)) grip.releasePointerCapture(event.pointerId);
+    };
+    grip.addEventListener('pointerup', end);
+    grip.addEventListener('pointercancel', end);
+    grip.addEventListener('lostpointercapture', end);
+    window.addEventListener('resize', () => {
+      const box = root.getBoundingClientRect();
+      place(box.left, box.top);
+    });
+  }
+
+  function mountRepairAssistant() {
+    if (!/^https:\/\/(?:www\.)?siriser\.com$/i.test(location.origin) ||
+        !isLabelingTaskPage() ||
+        document.getElementById('siriser-repair-root')) return;
+    const root = document.createElement('div');
+    root.id = 'siriser-repair-root';
+    root.innerHTML = `
+      <section id="siriser-repair-panel" aria-label="返修辅助导航">
+        <div class="sir-repair-grip" title="按住拖动返修导航" aria-label="拖动返修导航">···</div>
+        <button type="button" class="sir-repair-read" data-repair-act="read" title="读取返修沟通意见；不会改分或提交">解析</button>
+        <div id="siriser-repair-status" role="status" class="sir-repair-sr"></div>
+        <div id="siriser-repair-models"></div>
+      </section>`;
+    document.body.appendChild(root);
+    bindRepairPanelDrag(root);
+    const status = root.querySelector('#siriser-repair-status');
+    const modelBox = root.querySelector('#siriser-repair-models');
+    const readBtn = root.querySelector('[data-repair-act="read"]');
+    root.addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-repair-act],[data-repair-model]');
+      if (!button || button.disabled) return;
+      if (button.dataset.repairAct === 'read') {
+        readBtn.disabled = true;
+        status.textContent = '正在解析返修意见';
+        try {
+          const result = await readRepairCommunication({ assistOnly: true });
+          if (!result.corrections.length) {
+            _repairAssist = null;
+            modelBox.replaceChildren();
+            clearRepairAssistHints();
+            status.textContent = '未识别到模型、评分项及偏低/偏高';
+            toastMsg(status.textContent + '，请人工核对');
+            return;
+          }
+          const grouped = groupRepairCorrections(result.corrections);
+          modelBox.replaceChildren();
+          for (const [id, items] of grouped) {
+            const modelButton = document.createElement('button');
+            modelButton.type = 'button';
+            modelButton.dataset.repairModel = id;
+            modelButton.textContent = id;
+            modelButton.title = `模型 ${id}：${items.map((item) => `${REPAIR_DIM_NAMES[item.dim]} ${item.direction}`).join('；')}`;
+            modelButton.setAttribute('aria-label', modelButton.title);
+            modelBox.appendChild(modelButton);
+          }
+          const anchors = showRepairAssistHints(result.corrections);
+          _repairAssist = { ...result, scoreAnchors: anchors,
+            imageAnchors: collectRepairImageAnchors(grouped.keys()) };
+          status.textContent = `已解析 ${grouped.size} 个模型、${result.corrections.length} 个意见`;
+          toastMsg(status.textContent + (result.closeUnconfirmed ? '；若沟通弹窗仍显示，请手动关闭' : ''));
+        } catch (error) {
+          status.textContent = `读取失败：${String(error && error.message || error)}`;
+          toastMsg(status.textContent);
+          log('返修助手读取失败：' + String(error && error.message || error), 'err');
+        } finally { readBtn.disabled = false; }
+        return;
+      }
+      if (button.dataset.repairModel && _repairAssist) {
+        const id = button.dataset.repairModel;
+        const items = _repairAssist.corrections.filter((item) => item.model === id);
+        if (!jumpToRepairModel(id, _repairAssist)) {
+          status.textContent = `未找到模型 ${id} 的评分行，请手动定位。`;
+          toastMsg(status.textContent);
+          return;
+        }
+        status.textContent = `已定位模型 ${id}：${items.map((item) => `${REPAIR_DIM_NAMES[item.dim]}${item.direction}`).join('、')}`;
+      }
+    });
   }
 
   const HUMAN_KEY = "SIRISER_HUMAN_CLICK";
@@ -3947,6 +4705,11 @@
       }
       if (act === "auto-toggle") {
         try {
+          const repair = await loadRepairState();
+          if (repair.on) {
+            await stopRepairMode("用户停止返修模式");
+            return;
+          }
           const st = await loadAutoState();
           const on = !(st && st.on);
           await setAutoMode(on);
@@ -4035,6 +4798,11 @@
 
         // 自动模式只作开关；这里才是启动
         const autoSt = await loadAutoState();
+        if ((await loadRepairState()).on) {
+          setBusy(false, "返修模式运行中");
+          toastMsg("请先停止返修模式，再启动普通评分");
+          return;
+        }
         if (autoSt && autoSt.on && !onlyCurrent) {
           setBusy(false, "自动已启动");
           await startAuto(batchSize);
@@ -4069,7 +4837,10 @@
     });
 
     // 初始化开关状态
-    loadAutoState().then((st) => setAutoSwitchUI(!!(st && st.on)));
+    Promise.all([loadAutoState(), loadRepairState()]).then(([st, repair]) => {
+      setAutoSwitchUI(!!(st && st.on));
+      setRepairButtonUI(!!(repair && repair.on));
+    });
     loadHumanMode().then((on) => setHumanSwitchUI(on));
 
     document.addEventListener(
@@ -4086,33 +4857,27 @@
     log("悬浮球已挂载 v4-rowseq");
   }
 
+  async function resumeAutomationOnPage() {
+    const repair = await loadRepairState();
+    if (repair && repair.on) {
+      await stopRepairMode('自动返修已暂缓，请使用返修助手人工复核');
+      return;
+    }
+    const st = await loadAutoState();
+    if (st && st.on && (st.phase === "running" || st.phase === "countdown")) {
+      log("自动进行中，续跑 phase=" + st.phase);
+      setTimeout(autoLoop, 1200);
+    }
+  }
+
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", () => {
-      loadConfigFromStorage().then(mountFab).then(() => {
-        loadAutoState().then((st) => {
-          // 提交后换题会整页刷新：只要开关开着且在跑，就继续下一题
-          if (st && st.on && (st.phase === "running" || st.phase === "countdown")) {
-            log("自动进行中，续跑 phase=" + st.phase);
-            // 等新任务图/题面稳定一点再开
-            setTimeout(() => {
-              autoLoop();
-            }, 1200);
-          }
-        });
-      });
+      loadConfigFromStorage().then(mountFab).then(mountRepairAssistant).then(resumeAutomationOnPage);
     });
   } else {
     loadConfigFromStorage()
       .then(mountFab)
-      .then(() =>
-        loadAutoState().then((st) => {
-          if (st && st.on && (st.phase === "running" || st.phase === "countdown")) {
-            log("自动进行中，续跑 phase=" + st.phase);
-            setTimeout(() => {
-              autoLoop();
-            }, 1200);
-          }
-        })
-      );
+      .then(mountRepairAssistant)
+      .then(resumeAutomationOnPage);
   }
 })();

@@ -239,8 +239,9 @@ test("later workbench ID promotes a pending record and partial model ratings mer
   assert.equal(JSON.stringify(Array.from(records[0].scores, (score) => score.modelId).sort()), '["A","B"]');
 });
 
-test("manifest grants automatic local workbook downloads and extension version is bumped", () => {
+test("manifest keeps automatic local workbook downloads in current extension versions", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(extensionDir, "manifest.json"), "utf8"));
-  assert.equal(manifest.version, "1.0.61");
+  assert.match(manifest.version, /^1\.0\.\d+$/);
+  assert.ok(Number(manifest.version.split(".")[2]) >= 61);
   assert.ok(manifest.permissions.includes("downloads"));
 });
