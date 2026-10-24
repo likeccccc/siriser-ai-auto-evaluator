@@ -969,6 +969,87 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
     });
   }
 
+  /**
+   * 整列极端分：维度中文名，仅用于日志与复核原因描述。
+   */
+  const EXTREME_DIM_CN = {
+    alignment: "指令遵循",
+    quality: "局部质量",
+    preservation: "非编辑区保持",
+    consistency: "全局一致",
+    realism: "真实感与美学",
+  };
+
+  /**
+   * 挑出「整列极端分」的模型：某个维度上打 1 或打 10 的模型数 ≥ minCount。
+   * 一个分包 10~18 个模型时整列同分是小概率事件，多半是评委这一维跑偏。
+   * 只负责挑项并打 _extreme 标记，不改任何分数。
+   */
+  function pickExtremeClusterReview(items, minCount) {
+    const picked = new Map();
+    DIM_KEYS.forEach((key) => {
+      [1, 10].forEach((extreme) => {
+        const same = items.filter((s) => typeof s[key] === "number" && s[key] === extreme);
+        if (same.length < minCount) return;
+        const label = `${EXTREME_DIM_CN[key] || key}=${extreme}`;
+        slog(`整列极端分：${label} 共 ${same.length}/${items.length} 个模型`);
+        same.forEach((s) => {
+          if (picked.has(s.model)) {
+            picked.get(s.model)._extreme += `、${label}`;
+            return;
+          }
+          s._extreme = label;
+          s._extremeTotal = same.length;
+          picked.set(s.model, s);
+        });
+      });
+    });
+    return Array.from(picked.values());
+  }
+
+  /**
+   * 命中整列极端分 → 交审核模型独立重判（复用 reviewScores）。
+   * 未配置审核模型时只在 notes 标记、不改分。
+   * 重判后是否仍极端由页面侧再判一次，仍极端才升级人工复核。
+   */
+  async function applyExtremeClusterReview(cleanTask, scores, cfg) {
+    const er = (cfg && cfg.EXTREME_REVIEW) || {};
+    if (er.ON === false) return scores;
+    // 成本闸门：机器重判每题最多多 10 次视觉调用，且纠偏效果未经验证，默认一律不调用，
+    // 检出即由页面侧卡住提交转人工。只有显式 RESCORE: true 才会额外请求。
+    if (er.RESCORE !== true) return scores;
+    const minCount = Math.max(2, Number(er.MIN_COUNT) || 6);
+    const hit = pickExtremeClusterReview(scores, minCount);
+    if (!hit.length) return scores;
+    const revModel = String(cfg.OPENAI_MODEL_REVIEW || "").trim();
+    if (!revModel) {
+      hit.forEach((s) => {
+        s.notes = ((s.notes || "") + ` ⚠整列极端(${s._extreme})未复核:无审核模型`).trim();
+      });
+      slog("整列极端分未复核：未配置审核模型", "err");
+      return scores;
+    }
+    const cap = Math.max(1, Number(er.MAX_MODELS) || 10);
+    const target = hit.slice(0, cap);
+    target.forEach((s) => {
+      s._singleJudgeReview = true;
+      s._reviewReason = `整列极端分：${s._extreme}（本包 ${s._extremeTotal} 个模型同分）`;
+    });
+    // cfg.MAX_REVIEW 默认只有 1，不放宽就只会重判一个、其余原样保留均值
+    const reviewCfg = { ...cfg, MAX_REVIEW: target.length };
+    const wantMs = Math.max(Number(cfg.REVIEW_BUDGET_MS) || 45000, target.length * 30000);
+    const capMs = Number(er.BUDGET_MS) > 0 ? Number(er.BUDGET_MS) : 240000;
+    const budgetMs = Math.max(60000, Math.min(capMs, wantMs));
+    slog(`整列极端分复核 ${target.length}/${hit.length} 个 → ${revModel}，预算 ${budgetMs / 1000}s`);
+    const reviewed = await reviewScores(cleanTask, target, reviewCfg, Date.now() + budgetMs);
+    const map = new Map(reviewed.map((s) => [s.model, s]));
+    return scores.map((s) => {
+      const r = map.get(s.model);
+      if (!r) return s;
+      return { ...r, notes: ((r.notes || "") + " ⚠已整列极端复核").trim() };
+    });
+  }
+
   function singleModelReviewRisk(score) {
     const values = DIM_KEYS.map((key) => score[key]).filter((value) => typeof value === "number");
     if (!values.length) return null;
@@ -1391,7 +1472,8 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
           final = final.map((m) => revMap.get(m.model) || m);
         }
         const reviewed2 = await applyPolicyReview(cleanTask, final, cfg, reviewDeadline);
-        return applyGeometryDistortionCaps(rankSpreadScores(reviewed2));
+        const settled2 = applyGeometryDistortionCaps(rankSpreadScores(reviewed2));
+        return applyExtremeClusterReview(cleanTask, settled2, cfg);
       }
 
       // 空分：用当前存活评委重试一次，避免再次调用失败渠道。
@@ -1430,7 +1512,8 @@ notes≤30字，必须写该图特有缺陷（例：脸部过磨皮、灯向矛�
       const reviewDeadline2 =
         Date.now() + Math.max(20000, Number(cfg.REVIEW_BUDGET_MS) || 90000);
       const reviewed3 = await applySingleModelReview(cleanTask, scoresA, cfg);
-      return applyGeometryDistortionCaps(rankSpreadScores(reviewed3));
+      const settled3 = applyGeometryDistortionCaps(rankSpreadScores(reviewed3));
+      return applyExtremeClusterReview(cleanTask, settled3, cfg);
     }
 
     throw new Error("未配置 API_URL 或 OPENAI_API_KEY");
