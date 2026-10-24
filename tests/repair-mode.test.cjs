@@ -47,6 +47,25 @@ test('repair feedback maps each model and dimension to its own direction', () =>
   ]);
 });
 
+test('repair feedback shares one opinion across parallel full model prefixes', () => {
+  const context = {};
+  vm.runInNewContext(section('  function parseRepairFeedback(', '  async function readRepairCommunication(') +
+    '\nglobalThis.parse = parseRepairFeedback;', context);
+  // 2026-10-22 实际返修意见：B、H 并列，意见只在最后一个前缀后面，两者都低。
+  assert.deepEqual(JSON.parse(JSON.stringify(context.parse('模型-模型-B、模型-模型-H视觉真实感与美学偏低'))), [
+    { model: 'B', dim: 'realism', direction: '偏低' },
+    { model: 'H', dim: 'realism', direction: '偏低' },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.parse('模型-模型-B和模型-模型-H全局一致性偏低'))), [
+    { model: 'B', dim: 'consistency', direction: '偏低' },
+    { model: 'H', dim: 'consistency', direction: '偏低' },
+  ]);
+  // 正文里顺带提到别的模型但没给意见时，不能误挂到那条意见上。
+  assert.deepEqual(JSON.parse(JSON.stringify(context.parse('模型-A的构图较好，模型-B编辑指令遵循偏低'))), [
+    { model: 'B', dim: 'alignment', direction: '偏低' },
+  ]);
+});
+
 test('repair feedback expands a shared opinion across shorthand model lists', () => {
   const context = {};
   vm.runInNewContext(section('  function parseRepairFeedback(', '  async function readRepairCommunication(') +
@@ -58,6 +77,57 @@ test('repair feedback expands a shared opinion across shorthand model lists', ()
     ...shared.map((model) => ({ model, dim: 'alignment', direction: '偏低' })),
     { model: 'M', dim: 'quality', direction: '偏低' },
     { model: 'R', dim: 'preservation', direction: '偏高' },
+  ]);
+});
+
+test('repair feedback reads repeated model prefixes and explicit low/high score wording', () => {
+  const context = {};
+  vm.runInNewContext(section('  function parseRepairFeedback(', '  async function readRepairCommunication(') +
+    '\nglobalThis.parse = parseRepairFeedback;', context);
+  const feedback = [
+    '模型-模型-A编辑指令遵循、打分较低，指令完成度较高',
+    '模型-模型-O非编辑区域保持打分较高，没有要求改变的内容改变',
+    '模型-模型-S、非编辑区域保持打分较高，没有要求改变的内容改变',
+    '模型-模型-S、全局一致性打分较高，新增、修改的内容没有自然融入原有场景',
+  ].join('\n');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.parse(feedback))), [
+    { model: 'A', dim: 'alignment', direction: '偏低' },
+    { model: 'O', dim: 'preservation', direction: '偏高' },
+    { model: 'S', dim: 'preservation', direction: '偏高' },
+    { model: 'S', dim: 'consistency', direction: '偏高' },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.parse('模型-A编辑指令遵循，指令完成度较高'))), [
+    { model: 'A', dim: 'alignment', direction: '未说明' },
+  ]);
+});
+
+test('repair feedback keeps model and dimension when direction is omitted', () => {
+  const context = {};
+  vm.runInNewContext(section('  function parseRepairFeedback(', '  async function readRepairCommunication(') +
+    '\nglobalThis.parse = parseRepairFeedback;', context);
+  const feedback = '模型-模型-H、非编辑区域保持、偏高、模型-模型-L、非编辑区域保持';
+  assert.deepEqual(JSON.parse(JSON.stringify(context.parse(feedback))), [
+    { model: 'H', dim: 'preservation', direction: '偏高' },
+    { model: 'L', dim: 'preservation', direction: '未说明' },
+  ]);
+});
+
+test('repair feedback parses 2026-10-22 screenshot wording with repeated prefixes and dual-dimension model', () => {
+  const context = {};
+  vm.runInNewContext(section('  function parseRepairFeedback(', '  async function readRepairCommunication(') +
+    '\nglobalThis.parse = parseRepairFeedback;', context);
+  const feedback = [
+    '返修沟通 (1)',
+    '注意：消息将在"提交题目"后同步给沟通用户',
+    '验收人员 2026-10-22 17:04:52 (驳回)',
+    '模型-模型-H编辑指令遵循打分较高、编辑结果没有准确地实现指令的编辑意图',
+    '模型-模型-F编辑指令遵循打分较高、编辑结果没有准确地实现指令的编辑意图',
+    '模型-模型-F编辑局部质量打分较高，编辑效果有瑕疵',
+  ].join('\n');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.parse(feedback))), [
+    { model: 'H', dim: 'alignment', direction: '偏高' },
+    { model: 'F', dim: 'alignment', direction: '偏高' },
+    { model: 'F', dim: 'quality', direction: '偏高' },
   ]);
 });
 

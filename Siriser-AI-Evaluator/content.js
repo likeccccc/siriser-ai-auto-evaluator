@@ -3048,7 +3048,7 @@
 
   function parseRepairFeedback(text) {
     const source = String(text || "").replace(/[\r\n]+/g, "、");
-    const marker = /模型\s*[-—–:]?\s*([A-S])\b/gi;
+    const marker = /(?:模型\s*[-—–:：]?\s*)+([A-S])\b/gi;
     const hits = [];
     let m;
     while ((m = marker.exec(source))) hits.push({ id: m[1].toUpperCase(), at: m.index, end: marker.lastIndex });
@@ -3058,6 +3058,9 @@
       ["realism", /视觉真实感与美学|真实感与美学/],
     ];
     const out = [];
+    // 「模型-模型-B、模型-模型-H视觉真实感与美学偏低」：B、H 两个完整前缀并列，意见只在最后。
+    // 若某模型到下一模型之间只剩分隔符（顿号/逗号/和/与/及等），记入 pending，与后面的模型共用意见。
+    let pending = [];
     for (let i = 0; i < hits.length; i++) {
       let part = source.slice(hits[i].end, hits[i + 1] ? hits[i + 1].at : source.length);
       const ids = [hits[i].id];
@@ -3069,10 +3072,27 @@
         ids.push(next[1].toUpperCase());
         part = part.slice(next[0].length);
       }
-      for (const [dim, re] of dims) {
-        const dm = part.match(re); if (!dm) continue;
-        const dir = part.slice(dm.index + dm[0].length, dm.index + dm[0].length + 24).match(/偏低|偏高/);
-        if (dir) for (const id of ids) out.push({ model: id, dim, direction: dir[0] });
+      // 去掉前后分隔连接词后若什么都不剩，说明该模型没有自己的意见，转给下一位。
+      if (/^[\s、,，/;；。和与及]*$/.test(part)) {
+        pending.push(...ids);
+        continue;
+      }
+      ids.unshift(...pending);
+      pending = [];
+      const foundDims = dims.map(([dim, re]) => {
+        const match = part.match(re);
+        return match && { dim, at: match.index, end: match.index + match[0].length };
+      }).filter(Boolean).sort((a, b) => a.at - b.at);
+      for (let j = 0; j < foundDims.length; j++) {
+        const current = foundDims[j];
+        const detail = part.slice(current.end, foundDims[j + 1]?.at ?? part.length);
+        // 只接受明确描述「分数」的高低；解释中的「完成度较高」不是评分方向。
+        // 有些返修意见只写「模型-L、非编辑区域保持」，没有附上偏低/偏高。
+        // 这种情况仍保留模型×评分项，交给辅助模式显示「方向未说明」并要求人工确认，
+        // 但绝不猜测方向，也不会进入自动改分流程。
+        const dir = detail.match(/偏(低|高)|(?:打分|评分|给分|分数|得分)\s*(?:偏|较|过|太)?\s*(低|高)/);
+        const direction = dir ? `偏${dir[1] || dir[2]}` : '未说明';
+        for (const id of ids) out.push({ model: id, dim: current.dim, direction });
       }
     }
     return out.filter((v, i, a) => a.findIndex((x) => x.model === v.model && x.dim === v.dim) === i);
@@ -4217,14 +4237,18 @@
       if (!anchor) continue;
       const current = selectedRepairScore(cell);
       const hint = document.createElement('span');
-      hint.className = `sir-repair-hint ${item.direction === '偏高' ? 'sir-repair-high' : 'sir-repair-low'}`;
+      const knownDirection = item.direction === '偏高' || item.direction === '偏低';
+      const directionLabel = knownDirection ? item.direction : '方向未说明';
+      hint.className = `sir-repair-hint ${item.direction === '偏高' ? 'sir-repair-high' : item.direction === '偏低' ? 'sir-repair-low' : 'sir-repair-unknown'}`;
       let reference = '';
-      if (current != null) {
+      if (current != null && knownDirection) {
         try { reference = ` · 参考 ${repairAdjustedScore(current, item.direction)} 分`; }
         catch (_) { reference = ' · 原分与意见不符，请核对'; }
       }
-      hint.textContent = `${item.direction}${current == null ? ' · 原分未识别' : ` · 原 ${current} 分${reference}`}`;
-      hint.title = `模型 ${item.model} · ${REPAIR_DIM_NAMES[item.dim]} · ${item.direction}`;
+      hint.textContent = knownDirection
+        ? `${directionLabel}${current == null ? ' · 原分未识别' : ` · 原 ${current} 分${reference}`}`
+        : `${directionLabel} · 请人工确认`;
+      hint.title = `模型 ${item.model} · ${REPAIR_DIM_NAMES[item.dim]} · ${directionLabel}`;
       anchor.appendChild(hint);
       if (!anchors.has(item.model)) anchors.set(item.model, anchor);
     }
@@ -4346,6 +4370,9 @@
             _repairAssist = null;
             modelBox.replaceChildren();
             clearRepairAssistHints();
+            // 诊断：把实际读到的原文开头暴露到控制台，便于区分「读到的文本不对」与「版本过旧」。
+            const preview = (result.text || "").replace(/\s+/g, " ").slice(0, 200);
+            log(`返修未识别到意见；本次读取 ${String(result.text || "").length} 字，原文开头：${preview || "（空）"}`, 'err');
             status.textContent = '未识别到模型、评分项及偏低/偏高';
             toastMsg(status.textContent + '，请人工核对');
             return;

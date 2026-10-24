@@ -269,6 +269,7 @@
 }
 .sir-repair-low { background: #e7f4ff; color: #075985; }
 .sir-repair-high { background: #fff0e8; color: #9a3412; }
+.sir-repair-unknown { background: #f3f4f6; color: #4b5563; border: 1px dashed #9ca3af; }
 .sir-repair-target { outline: 2px solid #b45309 !important; outline-offset: 3px; }
 
 /* ── 面板共性（必须完全不透明，避免与标注页文字叠字） ── */
