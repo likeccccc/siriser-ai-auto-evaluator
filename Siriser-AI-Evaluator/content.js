@@ -4578,6 +4578,56 @@
     });
   }
 
+  const REPAIR_NEXT_PARSE_KEY = 'SIRISER_REPAIR_NEXT_PARSE';
+
+  function repairNextTaskIdentity() {
+    // 忽略图片加载状态：只有提示词或图片地址改变，才当作题目内容变化。
+    try {
+      const [prompt, images] = JSON.parse(repairComparisonPageIdentity());
+      return JSON.stringify([prompt, images.map((image) => Array.isArray(image) ? image[0] : image)]);
+    } catch (_) { return ''; }
+  }
+
+  function startRepairNextAutoParse(readBtn) {
+    const getPending = () => {
+      try { return JSON.parse(sessionStorage.getItem(REPAIR_NEXT_PARSE_KEY) || 'null'); }
+      catch (_) { return null; }
+    };
+    const clearPending = () => { try { sessionStorage.removeItem(REPAIR_NEXT_PARSE_KEY); } catch (_) {} };
+    document.addEventListener('click', (event) => {
+      if (!event.isTrusted || !event.target?.closest) return;
+      const button = event.target.closest('button,[role="button"],input[type="submit"]');
+      if (!button || button.disabled || button.getAttribute?.('aria-disabled') === 'true' ||
+          button.closest?.('#siriser-root,#siriser-repair-root,#siriser-repair-compare,#siriser-result,#siriser-diag')) return;
+      if (!/^提交并下一题$/.test(textOf(button) || button.value || '')) return;
+      try {
+        sessionStorage.setItem(REPAIR_NEXT_PARSE_KEY, JSON.stringify({
+          url: location.href, prompt: readPrompt(), identity: repairNextTaskIdentity(), at: Date.now(),
+        }));
+      } catch (_) { log('无法保存下一题自动解析状态，请手动点击解析', 'err'); }
+    }, true);
+    let observed = '';
+    let stable = 0;
+    const check = () => {
+      const pending = getPending();
+      if (!pending || !isLabelingTaskPage()) return;
+      if (Date.now() - pending.at > 120000) { clearPending(); return; }
+      const identity = repairNextTaskIdentity();
+      const prompt = readPrompt();
+      if (!prompt || !identity || !pending.identity || identity === pending.identity ||
+          (location.href === pending.url && prompt === pending.prompt)) { observed = ''; stable = 0; return; }
+      const current = `${location.href}|${identity}`;
+      if (current !== observed) { observed = current; stable = 1; return; }
+      stable++;
+      if (stable < 2 || readBtn.disabled || !findTextButton(/^\s*返修沟通/)) return;
+      clearPending();
+      log('已进入下一题，自动读取返修意见', 'ok');
+      readBtn.click();
+    };
+    window.setInterval(check, 1200);
+    check();
+  }
+
   function mountRepairAssistant() {
     if (!/^https:\/\/(?:www\.)?siriser\.com$/i.test(location.origin) ||
         !isLabelingTaskPage() ||
@@ -4667,6 +4717,7 @@
         status.textContent = `已定位模型 ${id}：${items.map((item) => `${REPAIR_DIM_NAMES[item.dim]}${item.direction}`).join('、')}`;
       }
     });
+    startRepairNextAutoParse(readBtn);
   }
 
   const HUMAN_KEY = "SIRISER_HUMAN_CLICK";

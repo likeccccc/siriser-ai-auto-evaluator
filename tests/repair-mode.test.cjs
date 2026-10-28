@@ -316,6 +316,44 @@ test('repair comparison updates after a new package without showing the previous
   assert.deepEqual(actions, ['show:old', 'clear-old', 'show:new']);
 });
 
+test('submit and next parses once only after new task content is stable and feedback exists', () => {
+  const handlers = {};
+  let timer;
+  let prompt = 'old prompt';
+  let identity = 'old';
+  let hasFeedback = false;
+  let parsed = 0;
+  const saved = new Map();
+  const location = { href: 'https://example.test/task/one' };
+  const readBtn = { disabled: false, click() { parsed++; } };
+  const context = {
+    location, Date, document: { addEventListener: (name, fn) => { handlers[name] = fn; } },
+    window: { setInterval: (fn) => { timer = fn; } },
+    sessionStorage: { getItem: (key) => saved.get(key), setItem: (key, value) => saved.set(key, value), removeItem: (key) => saved.delete(key) },
+    repairComparisonPageIdentity: () => JSON.stringify([prompt, [[identity, true, 100, 100]]]),
+    readPrompt: () => prompt, isLabelingTaskPage: () => true, textOf: () => '提交并下一题',
+    findTextButton: () => hasFeedback ? {} : null, log() {},
+  };
+  vm.runInNewContext(section('  const REPAIR_NEXT_PARSE_KEY =', '  function mountRepairAssistant(') +
+    '\nglobalThis.start = startRepairNextAutoParse;', context);
+  context.start(readBtn);
+  const button = { disabled: false, closest: () => null, getAttribute: () => null };
+  handlers.click({ isTrusted: false, target: { closest: () => button } });
+  assert.equal(saved.size, 0);
+  handlers.click({ isTrusted: true, target: { closest: () => button } });
+  timer();
+  location.href = 'https://example.test/task/two';
+  timer();
+  assert.equal(parsed, 0);
+  prompt = 'new prompt'; identity = 'new';
+  timer(); timer();
+  assert.equal(parsed, 0);
+  hasFeedback = true;
+  timer(); timer();
+  assert.equal(parsed, 1);
+  assert.equal(saved.size, 0);
+});
+
 test('repair strip drag stays on screen and does not involve its action buttons', () => {
   const events = {};
   let captured = null;
