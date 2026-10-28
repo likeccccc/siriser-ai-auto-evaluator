@@ -194,13 +194,17 @@
   line-height: 1.4;
 }
 
-/* 独立返修助手：只做意见导航，不参与评分点击。 */
+/* 返修意见按钮在图片对比窗口右侧统一排列。 */
 #siriser-repair-root {
-  position: fixed;
-  left: 8px;
-  top: 17vh;
-  width: 50px;
-  z-index: 2147483646;
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  z-index: 1;
+  width: auto;
+  min-width: 0;
+  max-height: calc(100% - 80px);
+  display: flex;
   pointer-events: auto;
   font: 12px/1.35 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
   color: #1c2329;
@@ -209,15 +213,15 @@
 #siriser-repair-panel {
   display: flex;
   width: 100%;
-  max-height: 70vh;
+  max-width: 100%;
+  max-height: inherit;
   overflow: hidden;
-  border: 1px solid #e2cfb9;
-  border-radius: 9px;
-  background: #fff;
-  box-shadow: 0 7px 22px rgba(27, 37, 46, .18);
+  border: 0;
+  background: transparent;
   flex-direction: column;
-  gap: 3px;
-  padding: 4px;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
 }
 #siriser-repair-panel .sir-repair-grip {
   height: 12px;
@@ -230,23 +234,25 @@
 }
 #siriser-repair-panel .sir-repair-grip:active { cursor: grabbing; }
 #siriser-repair-panel button {
-  width: 100%;
+  width: auto;
+  min-width: 32px;
   min-height: 30px;
   border: 1px solid #d8dde1;
   border-radius: 6px;
   background: #fff;
   color: #26343e;
-  padding: 4px 2px;
+  padding: 4px 7px;
   cursor: pointer;
   font: 650 11px system-ui, "Microsoft YaHei", sans-serif;
 }
 #siriser-repair-panel button:disabled { opacity: .5; cursor: not-allowed; }
-#siriser-repair-panel .sir-repair-read { width: 100%; background: #b45309; border-color: #b45309; color: white; }
+#siriser-repair-panel .sir-repair-read { width: auto; flex: 0 0 auto; background: #b45309; border-color: #b45309; color: white; }
 #siriser-repair-models {
   display: flex;
   flex-direction: column;
   gap: 3px;
   min-height: 0;
+  flex: 0 1 auto;
   overflow-y: auto;
   scrollbar-width: thin;
 }
@@ -295,10 +301,16 @@
   font: 13px/1.45 system-ui, "Microsoft YaHei", sans-serif;
 }
 #siriser-repair-compare.open { display: flex; flex-direction: column; }
+#siriser-repair-compare.collapsed { height: auto !important; min-height: 0; resize: none; }
+#siriser-repair-compare.collapsed .sir-repair-compare-body { display: none; }
+#siriser-repair-compare.collapsed #siriser-repair-models { display: none; }
+#siriser-repair-compare.collapsed #siriser-repair-root { position: static; transform: none; max-height: none; }
 #siriser-repair-compare * { box-sizing: border-box; }
 .sir-repair-compare-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 9px 12px; background: #eef2f4; cursor: grab; user-select: none; }
+.sir-repair-compare-head strong, .sir-repair-compare-head [data-close] { flex: 0 0 auto; }
+.sir-repair-compare-head [data-repair-controls] { flex: 1 1 auto; min-width: 0; overflow: visible; }
 .sir-repair-compare-head button { cursor: pointer; padding: 4px 10px; border: 1px solid #cbd5df; border-radius: 6px; background: white; color: #1c2329; }
-.sir-repair-compare-body { flex: 1 1 auto; min-height: 0; padding: 10px; overflow: auto; }
+.sir-repair-compare-body { flex: 1 1 auto; min-height: 0; padding: 10px 52px 10px 10px; overflow: auto; }
 .sir-repair-compare-prompt { padding: 8px; margin-bottom: 10px; border-radius: 7px; background: #f4f6f7; white-space: pre-wrap; overflow-wrap: anywhere; }
 .sir-repair-compare-images { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .sir-repair-compare-images > div { min-width: 0; padding: 7px; border: 1px solid #d5dde3; border-radius: 8px; }

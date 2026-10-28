@@ -195,12 +195,12 @@ test('repair assistant groups named models and marks only criticized score rows'
   ]);
 });
 
-test('repair assistant is a narrow, always-open navigation strip without scoring actions', () => {
+test('repair assistant combines navigation with comparison without scoring actions', () => {
   const assistant = section('  function mountRepairAssistant(', '  const HUMAN_KEY =');
   assert.match(assistant, /data-repair-act="read"[^>]*>解析<\/button>/);
   assert.match(assistant, /data-repair-model/);
   assert.match(assistant, /modelButton\.textContent = id/);
-  assert.match(assistant, /bindRepairPanelDrag\(root\)/);
+  assert.match(source, /querySelector\('\[data-repair-controls\]'\)\.appendChild\(controls\)/);
   assert.doesNotMatch(assistant, /siriser-repair-fab|data-repair-act="auto"|data-repair-act="close"/);
   assert.doesNotMatch(assistant, /SiriserAPI|runAutoScore|applyScores|fireClick|submitRepairTask/);
   assert.match(section('  async function resumeAutomationOnPage(', '  if (document.readyState'), /stopRepairMode\('自动返修已暂缓/);
@@ -231,6 +231,89 @@ test('repair comparison follows the manually selected score model only after par
   handlers.click(eventFor('A', false));
   handlers.click(eventFor('C'));
   assert.deepEqual(selected, ['A', 'B']);
+});
+
+test('repair comparison follows visible score rows in the scrolled panel', () => {
+  const handlers = {};
+  let frame;
+  const option = (top, bottom) => ({ isConnected: true, getBoundingClientRect: () => ({ top, bottom, height: bottom - top }) });
+  const a = option(80, 120);
+  const b = option(440, 480);
+  const unrelated = option(470, 490);
+  const scroller = { contains: (node) => node === a || node === b,
+    getBoundingClientRect: () => ({ top: 0, bottom: 600 }), closest: () => null };
+  const groups = new Map([
+    ['A', { alignment: { options: { 1: a } } }],
+    ['B', { alignment: { options: { 1: b } } }],
+  ]);
+  const selected = [];
+  const document = { addEventListener: (name, fn) => { handlers[name] = fn; }, body: {}, documentElement: {} };
+  const context = { document, window: { innerHeight: 600 }, DIMS: ['alignment'],
+    collectScoreGroups: () => ({ groups }), requestAnimationFrame: (fn) => { frame = fn; return 1; },
+    showRepairComparison: (id, state) => { selected.push(id); state.compareModel = id; } };
+  vm.runInNewContext('let _repairAssist = null;\n' +
+    section('  function repairModelAtScrollCenter(', '  function repairScoreAnchor(') +
+    '\nglobalThis.activate = (state) => { _repairAssist = state; bindRepairScoreComparison(state); };' +
+    '\nglobalThis.atCenter = repairModelAtScrollCenter;', context);
+  const state = {};
+  context.activate(state);
+  assert.equal(context.atCenter([{ option: unrelated, model: 'C' }, { option: a, model: 'A' }, { option: b, model: 'B' }], scroller), 'B');
+  handlers.scroll({ target: scroller });
+  frame();
+  handlers.scroll({ target: scroller });
+  frame();
+  state.compareClosed = true;
+  handlers.scroll({ target: scroller });
+  assert.deepEqual(selected, ['B']);
+});
+
+test('repair comparison opens after parsing at the visible model and does not guess when none is visible', () => {
+  const document = { body: {}, documentElement: {}, contains: () => true };
+  const scroller = { parentElement: document.body, scrollHeight: 1200, clientHeight: 600,
+    contains: () => true, getBoundingClientRect: () => ({ top: 0, bottom: 600 }) };
+  const row = { parentElement: scroller, isConnected: true,
+    getBoundingClientRect: () => ({ top: 270, bottom: 300, height: 30 }) };
+  const opened = [];
+  const context = { document, window: { innerHeight: 600 }, getComputedStyle: () => ({ overflowY: 'auto' }),
+    showRepairComparison: (model) => opened.push(model) };
+  vm.runInNewContext(section('  function repairModelAtScrollCenter(', '  function bindRepairScoreComparison(') +
+    '\nglobalThis.openInitial = openInitialRepairComparison;', context);
+  context.openInitial({ compareRows: [{ model: 'C', option: row }] });
+  context.openInitial({ compareRows: [] });
+  assert.deepEqual(opened, ['C', null]);
+  assert.match(section('  function mountRepairAssistant(', '  const HUMAN_KEY ='), /openInitialRepairComparison\(_repairAssist\)/);
+});
+
+test('repair comparison starts independently and parsing does not clear its pictures', () => {
+  const assistant = section('  function mountRepairAssistant(', '  const HUMAN_KEY =');
+  assert.match(assistant, /startRepairComparisonAutoRefresh\(\)/);
+  assert.doesNotMatch(assistant, /showRepairComparison\(null, loadingState, true\)/);
+  assert.match(assistant, /_repairClosed\) _repairAssist\.compareClosed = true/);
+});
+
+test('repair comparison updates after a new package without showing the previous package', () => {
+  let timer;
+  let identity = 'old';
+  const actions = [];
+  const location = { href: 'https://example.test/task/one' };
+  const context = {
+    location, window: { setInterval: (fn) => { timer = fn; } },
+    document: { getElementById: () => null }, isLabelingTaskPage: () => true,
+    repairComparisonPageIdentity: () => identity, clearRepairAssistHints: () => {}, log: () => {},
+    bindRepairScoreComparison: (state) => { state.compareRows = []; },
+    openInitialRepairComparison: () => actions.push(`show:${identity}`),
+    showRepairComparison: (id, state, loading) => actions.push(loading ? 'clear-old' : `show:${id}`),
+  };
+  vm.runInNewContext('let _repairAssist = null;\n' +
+    section('  function startRepairComparisonAutoRefresh(', '  function repairScoreAnchor(') +
+    '\nglobalThis.start = startRepairComparisonAutoRefresh;', context);
+  context.start();
+  location.href = 'https://example.test/task/two';
+  timer();
+  timer();
+  identity = 'new';
+  timer();
+  assert.deepEqual(actions, ['show:old', 'clear-old', 'show:new']);
 });
 
 test('repair strip drag stays on screen and does not involve its action buttons', () => {
@@ -300,6 +383,27 @@ test('repair image mapping uses nearby image DOM without image compression', () 
   assert.equal(context.collect(['S']).get('S'), image);
 });
 
+test('repair comparison matches each visible model image without borrowing a neighbor', () => {
+  const rect = (top, bottom, left = 50, right = 450) => ({ top, bottom, left, right, height: bottom - top });
+  const dLabel = { getBoundingClientRect: () => rect(80, 100, 10, 45) };
+  const eLabel = { getBoundingClientRect: () => rect(230, 250, 10, 45) };
+  const fLabel = { getBoundingClientRect: () => rect(550, 570, 10, 45) };
+  const broken = { closest: () => null, getBoundingClientRect: () => rect(85, 95), broken: true };
+  const imageE = { closest: () => null, getBoundingClientRect: () => rect(100, 400) };
+  const imageF = { closest: () => null, getBoundingClientRect: () => rect(410, 710) };
+  const ref = { closest: () => null, getBoundingClientRect: () => rect(-400, -100) };
+  const context = { HEU: {}, getAreas: () => ({ content: {} }),
+    findTextLabels: () => [{ raw: 'D', el: dLabel }, { raw: 'E', el: eLabel }, { raw: 'F', el: fLabel }],
+    extractModelId: (raw) => raw, qa: () => [ref, broken, imageE, imageF],
+    isRealGenImg: (img) => !img.broken, isBrokenModelImg: (img) => !!img.broken };
+  vm.runInNewContext(section('  function findRepairComparisonImage(', '  function showRepairComparison(') +
+    '\nglobalThis.findImage = findRepairComparisonImage;', context);
+  assert.equal(context.findImage('D', ref), broken);
+  assert.equal(context.findImage('E', ref), imageE);
+  assert.equal(context.findImage('F', ref), imageF);
+  assert.equal(context.findImage('G', ref), null);
+});
+
 test('repair communication closes its own dialog before continuing', async () => {
   const close = {
     isConnected: true, getAttribute: () => '',
@@ -325,6 +429,28 @@ test('repair communication closes its own dialog before continuing', async () =>
   const result = await context.read();
   assert.equal(closeCount, 1);
   assert.equal(result.corrections[0].model, 'B');
+});
+
+test('repair drawer close lookup ignores the comparison window close button', () => {
+  const body = {};
+  const compareClose = {
+    closest: (selector) => selector.includes('#siriser-repair-compare') ? {} : null,
+    getAttribute: () => '', getBoundingClientRect: () => ({ left: 690, right: 730, top: 35, bottom: 65 }),
+  };
+  const siteClose = {
+    closest: () => null, getAttribute: () => '',
+    getBoundingClientRect: () => ({ left: 900, right: 940, top: 35, bottom: 65 }),
+  };
+  const dialog = { parentElement: body,
+    getBoundingClientRect: () => ({ left: 600, right: 1000, top: 20, bottom: 700 }) };
+  const context = {
+    document: { body }, window: { innerWidth: 1000, innerHeight: 800 }, visible: () => true,
+    textOf: () => '关闭', qa: (selector, root) => root === dialog ? [] : [compareClose, siteClose],
+    findTextLabels: () => [], log() {},
+  };
+  vm.runInNewContext(section('  function findRepairDialogClose(', '  async function readRepairCommunication(') +
+    '\nglobalThis.findClose = findRepairDialogClose;', context);
+  assert.equal(context.findClose(dialog), siteClose);
 });
 
 test('repair drawer close button can be a sibling of the selected message container', async () => {

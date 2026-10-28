@@ -3105,7 +3105,7 @@
     const selector = 'button,[role="button"],.ant-drawer-close,.ant-modal-close,[aria-label]';
     const dialogBox = dialog.getBoundingClientRect();
     const isClose = (el) => {
-      if (!visible(el) || el.closest?.('#siriser-root,#siriser-repair-root,#siriser-result,#siriser-diag')) return false;
+      if (!visible(el) || el.closest?.('#siriser-root,#siriser-repair-root,#siriser-repair-compare,#siriser-map,#siriser-lightbox,#siriser-result,#siriser-diag')) return false;
       return /^\s*关闭\s*$/.test(textOf(el)) || /^(close|关闭)$/i.test(el.getAttribute?.('aria-label') || '') ||
         el.classList?.contains('ant-drawer-close') || el.classList?.contains('ant-modal-close');
     };
@@ -3129,7 +3129,7 @@
     // 自定义抽屉可能用普通 span/div 显示「关闭」，并非 button 或 role=button。
     const closeText = findTextLabels(/^关闭$/, document.body)
       .map(({ el }) => el)
-      .filter((el) => visible(el) && !el.closest?.('#siriser-root,#siriser-repair-root,#siriser-result,#siriser-diag'))
+      .filter((el) => visible(el) && !el.closest?.('#siriser-root,#siriser-repair-root,#siriser-repair-compare,#siriser-map,#siriser-lightbox,#siriser-result,#siriser-diag'))
       .filter((el) => {
         const box = el.getBoundingClientRect();
         return box.left > window.innerWidth / 2 && box.top >= 0 &&
@@ -4223,8 +4223,75 @@
     qa('.sir-repair-target').forEach((el) => el.classList.remove('sir-repair-target'));
   }
 
+  // 仅在内容区将模型标签与最近的图片区配对，不用旁边的其他模型图兜底。
+  function findRepairComparisonImage(modelId, refImg) {
+    const { content } = getAreas();
+    const modelRe = HEU.modelLabel || /^(?:模型|model)\s*[-–—_：: ]*\s*([A-S])$/i;
+    const labels = findTextLabels(modelRe, content).map(({ raw, el }) => ({ id: extractModelId(raw), el }))
+      .filter(({ id }) => /^[A-S]$/.test(id));
+    const target = labels.find(({ id }) => id === modelId);
+    if (!target) return null;
+    const images = qa('img', content).filter((img) => img !== refImg &&
+      !img.closest?.('#siriser-repair-compare,#siriser-map,#siriser-lightbox,#siriser-root,#siriser-repair-root') &&
+      (isRealGenImg(img) || isBrokenModelImg(img)));
+    const distance = (label, img) => {
+      const l = label.el.getBoundingClientRect();
+      const r = img.getBoundingClientRect();
+      const dy = (l.top + l.bottom - r.top - r.bottom) / 2;
+      const dx = Math.max(0, r.left - l.right, l.left - r.right);
+      return Math.hypot(dx, dy);
+    };
+    let best = null;
+    for (const img of images) {
+      const d = distance(target, img);
+      const closest = labels.reduce((a, label) => distance(label, img) < distance(a, img) ? label : a, labels[0]);
+      if (closest !== target) continue;
+      const box = img.getBoundingClientRect();
+      if (d > Math.max(360, box.height * 1.5)) continue;
+      if (!best || d < best.distance) best = { img, distance: d };
+    }
+    return best?.img || null;
+  }
+
   // 返修对照只用于人工查看；沿用页面图片，不压缩、不触发评分请求。
-  function showRepairComparison(modelId, state) {
+  function showRepairComparison(modelId, state, loading = false) {
+    let panel = document.getElementById('siriser-repair-compare');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'siriser-repair-compare';
+      panel.setAttribute('aria-label', '返修图片对比');
+      panel.innerHTML = `<div class="sir-repair-compare-head"><strong title="拖动窗口右下角可调整大小">返修图片对比</strong><div data-repair-controls></div><button type="button" data-close>收起</button></div>
+        <div class="sir-repair-compare-body"><div class="sir-repair-compare-prompt"><b>提示词</b><div data-prompt></div></div>
+        <div class="sir-repair-compare-images"><div><b>参考图</b><div data-ref></div></div><div><b data-model-title></b><div data-model></div></div></div></div>`;
+      document.body.appendChild(panel);
+      const controls = document.getElementById('siriser-repair-root');
+      if (controls) panel.querySelector('[data-repair-controls]').appendChild(controls);
+      panel.querySelector('[data-close]').addEventListener('click', () => {
+        const collapsed = panel.classList.toggle('collapsed');
+        panel.querySelector('[data-close]').textContent = collapsed ? '展开' : '收起';
+        panel._repairClosed = collapsed;
+        if (_repairAssist) {
+          _repairAssist.compareClosed = collapsed;
+          if (!collapsed) openInitialRepairComparison(_repairAssist);
+        }
+      });
+      panel.addEventListener('click', (event) => {
+        if (event.target.tagName === 'IMG') openLightbox(event.target.src, event.target.alt);
+      });
+      makeDraggable(panel, panel.querySelector('.sir-repair-compare-head'));
+      panel.classList.add('open');
+    }
+    if (loading) {
+      panel._repairClosed = false;
+      panel.classList.remove('collapsed');
+      panel.querySelector('[data-close]').textContent = '收起';
+      panel.querySelector('[data-prompt]').textContent = '正在读取返修意见和图片…';
+      panel.querySelector('[data-model-title]').textContent = '当前模型';
+      panel.querySelector('[data-ref]').textContent = '加载中…';
+      panel.querySelector('[data-model]').textContent = '加载中…';
+      panel.classList.add('open');
+      return;
+    }
     let visual = state.compareVisual;
     let model = visual?.models.find((item) => item.id === modelId);
     if (!visual || !model?.imgEl?.isConnected || !visual.refImg?.isConnected) {
@@ -4232,23 +4299,8 @@
       state.compareVisual = visual;
       model = visual.models.find((item) => item.id === modelId);
     }
-    let panel = document.getElementById('siriser-repair-compare');
-    if (!panel) {
-      panel = document.createElement('section');
-      panel.id = 'siriser-repair-compare';
-      panel.setAttribute('aria-label', '返修图片对比');
-      panel.innerHTML = `<div class="sir-repair-compare-head"><strong title="拖动窗口右下角可调整大小">返修图片对比</strong><button type="button" data-close>关闭</button></div>
-        <div class="sir-repair-compare-body"><div class="sir-repair-compare-prompt"><b>提示词</b><div data-prompt></div></div>
-        <div class="sir-repair-compare-images"><div><b>参考图</b><div data-ref></div></div><div><b data-model-title></b><div data-model></div></div></div></div>`;
-      document.body.appendChild(panel);
-      panel.querySelector('[data-close]').addEventListener('click', () => panel.classList.remove('open'));
-      panel.addEventListener('click', (event) => {
-        if (event.target.tagName === 'IMG') openLightbox(event.target.src, event.target.alt);
-      });
-      makeDraggable(panel, panel.querySelector('.sir-repair-compare-head'));
-    }
     panel.querySelector('[data-prompt]').textContent = readPrompt() || '未识别到提示词';
-    panel.querySelector('[data-model-title]').textContent = `模型-${modelId}`;
+    panel.querySelector('[data-model-title]').textContent = modelId ? `模型-${modelId}` : '当前模型未确定';
     const setImage = (slot, source, label) => {
       slot.replaceChildren();
       const src = source && (source.currentSrc || source.src || source.getAttribute('data-src'));
@@ -4263,30 +4315,147 @@
       slot.appendChild(image);
     };
     setImage(panel.querySelector('[data-ref]'), visual.refImg, '参考图');
-    setImage(panel.querySelector('[data-model]'), model?.imgEl, `模型-${modelId}`);
+    if (modelId) setImage(panel.querySelector('[data-model]'), findRepairComparisonImage(modelId, visual.refImg), `模型-${modelId}`);
+    else panel.querySelector('[data-model]').textContent = '请滚动右侧评分区或点击评分，显示对应模型图';
     panel.classList.add('open');
+    panel.classList.remove('collapsed');
+    panel.querySelector('[data-close]').textContent = '收起';
+    panel._repairClosed = false;
+    state.compareModel = modelId;
+  }
+
+  // 选择滚动视口中心最近的可见评分行；不把滚动条之外的模型误当成当前模型。
+  function repairModelAtScrollCenter(rows, scroller) {
+    const viewport = scroller === document || scroller === document.documentElement || scroller === document.body
+      ? { top: 0, bottom: window.innerHeight }
+      : scroller.getBoundingClientRect();
+    const top = Math.max(0, viewport.top);
+    const bottom = Math.min(window.innerHeight, viewport.bottom);
+    if (bottom <= top) return null;
+    const center = (top + bottom) / 2;
+    let best = null;
+    for (const { option, model } of rows) {
+      if (!option?.isConnected || !scroller.contains(option)) continue;
+      const rect = option.getBoundingClientRect();
+      if (!rect.height || rect.bottom <= top || rect.top >= bottom) continue;
+      const distance = Math.abs((Math.max(top, rect.top) + Math.min(bottom, rect.bottom)) / 2 - center);
+      if (!best || distance < best.distance) best = { model, distance };
+    }
+    return best?.model || null;
+  }
+
+  function openInitialRepairComparison(state) {
+    const rows = state.compareRows || [];
+    let scroller = null;
+    for (const { option } of rows) {
+      for (let node = option?.parentElement; node && node !== document.body; node = node.parentElement) {
+        const overflow = getComputedStyle(node).overflowY;
+        if (/(auto|scroll)/.test(overflow) && node.scrollHeight > node.clientHeight && rows.some((row) => node.contains(row.option))) {
+          scroller = node;
+          break;
+        }
+      }
+      if (scroller) break;
+    }
+    scroller = scroller || document;
+    const model = repairModelAtScrollCenter(rows, scroller);
+    state.compareClosed = false;
+    showRepairComparison(model, state);
   }
 
   function bindRepairScoreComparison(state) {
     const { groups } = collectScoreGroups();
     const options = [];
+    const rows = [];
     groups.forEach((dims, model) => {
       if (!/^[A-S]$/.test(model)) return;
       for (const dim of DIMS) {
-        for (const option of Object.values(dims[dim]?.options || {})) options.push({ option, model });
+        const scoreOptions = Object.values(dims[dim]?.options || {});
+        if (scoreOptions.length) rows.push({ option: scoreOptions[0], model });
+        for (const option of scoreOptions) options.push({ option, model });
       }
     });
     state.compareOptions = options;
+    state.compareRows = rows;
     if (state.compareListener) return;
     state.compareListener = (event) => {
       if (!event.isTrusted || !_repairAssist || _repairAssist !== state || !event.target?.closest) return;
       const target = event.target.closest('label,[role="radio"],input[type="radio"],input[type="checkbox"],.ant-radio-wrapper,.ant-radio-button-wrapper');
       if (!target) return;
       const match = state.compareOptions.find(({ option }) => option === target || option.contains?.(target) || target.contains?.(option));
-      if (match) showRepairComparison(match.model, state);
+      if (match) {
+        state.compareClosed = false;
+        showRepairComparison(match.model, state);
+      }
     };
     document.addEventListener('click', state.compareListener, true);
     document.addEventListener('change', state.compareListener, true);
+    state.compareScrollListener = (event) => {
+      const scroller = event.target;
+      if (_repairAssist !== state || state.compareClosed || !scroller?.contains ||
+          scroller.closest?.('#siriser-repair-compare,#siriser-root,#siriser-repair-root,#siriser-lightbox') ||
+          !state.compareRows.some(({ option }) => scroller.contains(option))) return;
+      state.compareScroller = scroller;
+      if (state.compareScrollFrame) return;
+      state.compareScrollFrame = requestAnimationFrame(() => {
+        state.compareScrollFrame = null;
+        if (_repairAssist !== state || state.compareClosed) return;
+        const model = repairModelAtScrollCenter(state.compareRows, state.compareScroller);
+        if (model && model !== state.compareModel) showRepairComparison(model, state);
+      });
+    };
+    document.addEventListener('scroll', state.compareScrollListener, true);
+  }
+
+  // 独立于返修意见解析，跟踪题目地址和原页面的图片/提示词。
+  function repairComparisonPageIdentity() {
+    const { content } = getAreas();
+    const images = qa('img', content).filter((img) => !img.closest?.('#siriser-repair-compare,#siriser-map,#siriser-lightbox,#siriser-root,#siriser-repair-root'))
+      .map((img) => {
+        const src = img.currentSrc || img.src || img.getAttribute('data-src') || '';
+        return src ? [src, !!img.complete, Number(img.naturalWidth) || 0, Number(img.naturalHeight) || 0] : null;
+      }).filter(Boolean);
+    return JSON.stringify([readPrompt(), images]);
+  }
+
+  function startRepairComparisonAutoRefresh() {
+    let lastUrl = '';
+    let lastIdentity = '';
+    let waitingForNewContent = false;
+    const refresh = () => {
+      if (!isLabelingTaskPage()) return;
+      try {
+        const url = location.href;
+        const identity = repairComparisonPageIdentity();
+        const routeChanged = !!lastUrl && url !== lastUrl;
+        if (routeChanged) {
+          waitingForNewContent = identity === lastIdentity;
+          if (_repairAssist) {
+            _repairAssist.compareVisual = null;
+            _repairAssist.compareModel = null;
+            _repairAssist.corrections = [];
+            _repairAssist.scoreAnchors = new Map();
+            _repairAssist.imageAnchors = new Map();
+            clearRepairAssistHints();
+            document.getElementById('siriser-repair-models')?.replaceChildren();
+            if (!_repairAssist.compareClosed) showRepairComparison(null, _repairAssist, true);
+          }
+        }
+        lastUrl = url;
+        if (waitingForNewContent && identity === lastIdentity) return;
+        if (waitingForNewContent) waitingForNewContent = false;
+        if (!routeChanged && identity === lastIdentity) return;
+        lastIdentity = identity;
+        if (!_repairAssist) _repairAssist = { corrections: [], scoreAnchors: new Map(), imageAnchors: new Map() };
+        _repairAssist.compareVisual = null;
+        bindRepairScoreComparison(_repairAssist);
+        if (!_repairAssist.compareClosed) openInitialRepairComparison(_repairAssist);
+      } catch (error) {
+        log('返修图片自动更新失败：' + String(error?.message || error), 'err');
+      }
+    };
+    refresh();
+    window.setInterval(refresh, 1200);
   }
 
   function repairScoreAnchor(cell) {
@@ -4417,31 +4586,32 @@
     root.id = 'siriser-repair-root';
     root.innerHTML = `
       <section id="siriser-repair-panel" aria-label="返修辅助导航">
-        <div class="sir-repair-grip" title="按住拖动返修导航" aria-label="拖动返修导航">···</div>
         <button type="button" class="sir-repair-read" data-repair-act="read" title="读取返修沟通意见；不会改分或提交">解析</button>
         <div id="siriser-repair-status" role="status" class="sir-repair-sr"></div>
         <div id="siriser-repair-models"></div>
       </section>`;
     document.body.appendChild(root);
-    bindRepairPanelDrag(root);
     const status = root.querySelector('#siriser-repair-status');
     const modelBox = root.querySelector('#siriser-repair-models');
     const readBtn = root.querySelector('[data-repair-act="read"]');
+    startRepairComparisonAutoRefresh();
     root.addEventListener('click', async (event) => {
       const button = event.target.closest('[data-repair-act],[data-repair-model]');
       if (!button || button.disabled) return;
       if (button.dataset.repairAct === 'read') {
         readBtn.disabled = true;
         status.textContent = '正在解析返修意见';
+        const repairTaskUrl = location.href;
         try {
+          // 图片对比已独立自动加载；解析只在用户关闭窗口后重新打开，不清空现有图片。
+          if (document.getElementById('siriser-repair-compare')?._repairClosed && _repairAssist) {
+            document.getElementById('siriser-repair-compare')._repairClosed = false;
+            openInitialRepairComparison(_repairAssist);
+          }
           const result = await readRepairCommunication({ assistOnly: true });
+          if (location.href !== repairTaskUrl) return;
           if (!result.corrections.length) {
-            if (_repairAssist?.compareListener) {
-              document.removeEventListener('click', _repairAssist.compareListener, true);
-              document.removeEventListener('change', _repairAssist.compareListener, true);
-            }
-            _repairAssist = null;
-            document.getElementById('siriser-repair-compare')?.classList.remove('open');
+            if (_repairAssist) _repairAssist.corrections = [];
             modelBox.replaceChildren();
             clearRepairAssistHints();
             // 诊断：把实际读到的原文开头暴露到控制台，便于区分「读到的文本不对」与「版本过旧」。
@@ -4466,10 +4636,17 @@
           if (_repairAssist?.compareListener) {
             document.removeEventListener('click', _repairAssist.compareListener, true);
             document.removeEventListener('change', _repairAssist.compareListener, true);
+            document.removeEventListener('scroll', _repairAssist.compareScrollListener, true);
           }
-          _repairAssist = { ...result, scoreAnchors: anchors,
+          const existingVisual = _repairAssist?.compareVisual;
+          _repairAssist = { ...result, compareVisual: existingVisual, scoreAnchors: anchors,
             imageAnchors: collectRepairImageAnchors(grouped.keys()) };
           bindRepairScoreComparison(_repairAssist);
+          try {
+            if (document.getElementById('siriser-repair-compare')?._repairClosed) _repairAssist.compareClosed = true;
+            else openInitialRepairComparison(_repairAssist);
+          }
+          catch (error) { log('返修图片对比打开失败：' + String(error?.message || error), 'err'); }
           status.textContent = `已解析 ${grouped.size} 个模型、${result.corrections.length} 个意见`;
           toastMsg(status.textContent + (result.closeUnconfirmed ? '；若沟通弹窗仍显示，请手动关闭' : ''));
         } catch (error) {
