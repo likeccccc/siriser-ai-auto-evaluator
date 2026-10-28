@@ -218,7 +218,8 @@ test('repair comparison follows the manually selected score model only after par
   const context = {
     DIMS: ['alignment', 'quality'], collectScoreGroups: () => ({ groups }),
     document: { addEventListener: (name, fn) => { handlers[name] = fn; } },
-    showRepairComparison: (id) => selected.push(id),
+    showRepairComparison: (id) => selected.push(id), showRepairExtremeScores() {}, repairExtremeSignature: () => '',
+    clearTimeout() {}, setTimeout: () => 1,
   };
   vm.runInNewContext('let _repairAssist = null;\n' +
     section('  function bindRepairScoreComparison(', '  function repairScoreAnchor(') +
@@ -250,7 +251,7 @@ test('repair comparison follows visible score rows in the scrolled panel', () =>
   const document = { addEventListener: (name, fn) => { handlers[name] = fn; }, body: {}, documentElement: {} };
   const context = { document, window: { innerHeight: 600 }, DIMS: ['alignment'],
     collectScoreGroups: () => ({ groups }), requestAnimationFrame: (fn) => { frame = fn; return 1; },
-    showRepairComparison: (id, state) => { selected.push(id); state.compareModel = id; } };
+    showRepairExtremeScores() {}, repairExtremeSignature: () => '', showRepairComparison: (id, state) => { selected.push(id); state.compareModel = id; } };
   vm.runInNewContext('let _repairAssist = null;\n' +
     section('  function repairModelAtScrollCenter(', '  function repairScoreAnchor(') +
     '\nglobalThis.activate = (state) => { _repairAssist = state; bindRepairScoreComparison(state); };' +
@@ -299,7 +300,7 @@ test('repair comparison updates after a new package without showing the previous
   const context = {
     location, window: { setInterval: (fn) => { timer = fn; } },
     document: { getElementById: () => null }, isLabelingTaskPage: () => true,
-    repairComparisonPageIdentity: () => identity, clearRepairAssistHints: () => {}, log: () => {},
+    repairComparisonPageIdentity: () => identity, clearRepairAssistHints: () => {}, qa: () => [], log: () => {},
     bindRepairScoreComparison: (state) => { state.compareRows = []; },
     openInitialRepairComparison: () => actions.push(`show:${identity}`),
     showRepairComparison: (id, state, loading) => actions.push(loading ? 'clear-old' : `show:${id}`),
@@ -314,6 +315,48 @@ test('repair comparison updates after a new package without showing the previous
   identity = 'new';
   timer();
   assert.deepEqual(actions, ['show:old', 'clear-old', 'show:new']);
+});
+
+test('extreme score marks follow selected values without altering model buttons or scores', () => {
+  const marked = [];
+  const anchors = new Map(['A', 'B', 'C', 'D', 'E'].map((id) => [id, { appendChild: (node) => marked.push([id, node.textContent]) }]));
+  const values = { A: 1, B: 2, C: 9, D: 10, E: 5 };
+  const groups = new Map(Object.entries(values).map(([id, score]) => [id, { alignment: { score, anchor: anchors.get(id) } }]));
+  const context = { DIMS: ['alignment'], qa: () => [], selectedRepairScore: (cell) => cell?.score,
+    repairScoreAnchor: (cell) => cell.anchor, document: { createElement: () => ({}) } };
+  vm.runInNewContext(section('  function updateRepairExtremeScore(', '  function showRepairAssistHints(') +
+    '\nglobalThis.show = showRepairExtremeScores;', context);
+  context.show(groups, {});
+  assert.deepEqual(marked, [['A', '低分 1'], ['B', '低分 2'], ['C', '高分 9'], ['D', '高分 10']]);
+  assert.deepEqual(values, { A: 1, B: 2, C: 9, D: 10, E: 5 });
+});
+
+test('changing a score refreshes only its own badge without rescanning all scores', () => {
+  const handlers = {};
+  let timer;
+  let scans = 0;
+  const option = { isConnected: true, contains: (node) => node === target };
+  const target = { contains: () => false };
+  const cell = { options: { 1: option } };
+  const groups = new Map([['A', { alignment: cell }]]);
+  const updated = [];
+  const context = { DIMS: ['alignment'],
+    document: { addEventListener: (name, fn) => { handlers[name] = fn; } },
+    collectScoreGroups: () => { scans++; return { groups }; },
+    showRepairExtremeScores() {}, repairExtremeSignature: () => 'scores',
+    updateRepairExtremeScore: (updatedCell) => updated.push(updatedCell),
+    showRepairComparison: (model, state) => { state.compareModel = model; },
+    clearTimeout() {}, setTimeout: (fn) => { timer = fn; return 1; } };
+  vm.runInNewContext('let _repairAssist = null;\n' +
+    section('  function bindRepairScoreComparison(', '  function repairComparisonPageIdentity(') +
+    '\nglobalThis.activate = (state) => { _repairAssist = state; bindRepairScoreComparison(state); };', context);
+  const state = {};
+  context.activate(state);
+  handlers.click({ isTrusted: true, target: { closest: () => target } });
+  timer();
+  assert.equal(scans, 1);
+  assert.equal(updated.length, 1);
+  assert.equal(updated[0], cell);
 });
 
 test('submit and next parses once only after new task content is stable and feedback exists', () => {

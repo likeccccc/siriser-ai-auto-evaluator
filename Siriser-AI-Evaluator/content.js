@@ -864,7 +864,6 @@
       // 父级聚类
       let p = host.parentElement;
       for (let i = 0; i < 5 && p; i++) {
-        const kids = allRadioLike().filter((x) => p.contains(x) || x.contains(p));
         // 更稳：p 下所有 host
         const inP = hosts.filter((x) => p.contains(x));
         const uniq = new Set();
@@ -4372,11 +4371,14 @@
       for (const dim of DIMS) {
         const scoreOptions = Object.values(dims[dim]?.options || {});
         if (scoreOptions.length) rows.push({ option: scoreOptions[0], model });
-        for (const option of scoreOptions) options.push({ option, model });
+        for (const option of scoreOptions) options.push({ option, model, cell: dims[dim] });
       }
     });
     state.compareOptions = options;
     state.compareRows = rows;
+    state.compareGroups = groups;
+    showRepairExtremeScores(groups, state);
+    state.extremeSignature = repairExtremeSignature(groups);
     if (state.compareListener) return;
     state.compareListener = (event) => {
       if (!event.isTrusted || !_repairAssist || _repairAssist !== state || !event.target?.closest) return;
@@ -4384,8 +4386,22 @@
       if (!target) return;
       const match = state.compareOptions.find(({ option }) => option === target || option.contains?.(target) || target.contains?.(option));
       if (match) {
-        state.compareClosed = false;
-        showRepairComparison(match.model, state);
+        if (state.compareClosed || state.compareModel !== match.model) {
+          state.compareClosed = false;
+          showRepairComparison(match.model, state);
+        }
+        if (!state.extremeRefreshTimers) state.extremeRefreshTimers = new Map();
+        clearTimeout(state.extremeRefreshTimers.get(match.cell));
+        state.extremeRefreshTimers.set(match.cell, setTimeout(() => {
+          state.extremeRefreshTimers.delete(match.cell);
+          if (_repairAssist !== state) return;
+          if (!match.option.isConnected) {
+            bindRepairScoreComparison(state);
+            return;
+          }
+          updateRepairExtremeScore(match.cell, state);
+          state.extremeSignature = repairExtremeSignature(state.compareGroups);
+        }, 150));
       }
     };
     document.addEventListener('click', state.compareListener, true);
@@ -4437,6 +4453,7 @@
             _repairAssist.scoreAnchors = new Map();
             _repairAssist.imageAnchors = new Map();
             clearRepairAssistHints();
+            qa('.sir-repair-extreme').forEach((el) => el.remove());
             document.getElementById('siriser-repair-models')?.replaceChildren();
             if (!_repairAssist.compareClosed) showRepairComparison(null, _repairAssist, true);
           }
@@ -4444,7 +4461,19 @@
         lastUrl = url;
         if (waitingForNewContent && identity === lastIdentity) return;
         if (waitingForNewContent) waitingForNewContent = false;
-        if (!routeChanged && identity === lastIdentity) return;
+        if (!routeChanged && identity === lastIdentity) {
+          if (_repairAssist?.compareGroups) {
+            if (_repairAssist.compareRows.some(({ option }) => !option.isConnected)) bindRepairScoreComparison(_repairAssist);
+            else {
+              const scores = repairExtremeSignature(_repairAssist.compareGroups);
+              if (scores !== _repairAssist.extremeSignature) {
+                showRepairExtremeScores(_repairAssist.compareGroups, _repairAssist);
+                _repairAssist.extremeSignature = scores;
+              }
+            }
+          }
+          return;
+        }
         lastIdentity = identity;
         if (!_repairAssist) _repairAssist = { corrections: [], scoreAnchors: new Map(), imageAnchors: new Map() };
         _repairAssist.compareVisual = null;
@@ -4463,6 +4492,41 @@
     const host = options['1'] || Object.values(options)[0];
     const sample = host?.tagName === 'INPUT' ? host.parentElement : host;
     return cell?.header?.parentElement || sample?.parentElement || sample || null;
+  }
+
+  function repairExtremeSignature(groups) {
+    const scores = [];
+    groups.forEach((dims, model) => {
+      if (!/^[A-S]$/.test(model)) return;
+      for (const dim of DIMS) scores.push([model, dim, selectedRepairScore(dims[dim])]);
+    });
+    return JSON.stringify(scores);
+  }
+
+  function updateRepairExtremeScore(cell, state) {
+    if (!cell) return;
+    if (!state.extremeMarks) state.extremeMarks = new Map();
+    state.extremeMarks.get(cell)?.remove();
+    state.extremeMarks.delete(cell);
+    const score = selectedRepairScore(cell);
+    if (![1, 2, 9, 10].includes(score)) return;
+    const anchor = repairScoreAnchor(cell);
+    if (!anchor) return;
+    const hint = document.createElement('span');
+    hint.className = `sir-repair-extreme ${score <= 2 ? 'sir-extreme-low' : 'sir-extreme-high'}`;
+    hint.textContent = score <= 2 ? `低分 ${score}` : `高分 ${score}`;
+    hint.title = `当前评分为 ${score} 分，请结合图片和返修意见核对`;
+    anchor.appendChild(hint);
+    state.extremeMarks.set(cell, hint);
+  }
+
+  function showRepairExtremeScores(groups, state) {
+    qa('.sir-repair-extreme').forEach((el) => el.remove());
+    state.extremeMarks = new Map();
+    groups.forEach((dims, model) => {
+      if (!/^[A-S]$/.test(model)) return;
+      for (const dim of DIMS) updateRepairExtremeScore(dims[dim], state);
+    });
   }
 
   function showRepairAssistHints(corrections) {

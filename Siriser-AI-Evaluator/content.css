@@ -276,6 +276,9 @@
 .sir-repair-low { background: #e7f4ff; color: #075985; }
 .sir-repair-high { background: #fff0e8; color: #9a3412; }
 .sir-repair-unknown { background: #f3f4f6; color: #4b5563; border: 1px dashed #9ca3af; }
+.sir-repair-extreme { display: inline-block; margin: 4px 6px; padding: 3px 6px; border-radius: 5px; font: 700 12px/1.3 system-ui, "Microsoft YaHei", sans-serif; white-space: nowrap; }
+.sir-extreme-low { background: #eef2ff; color: #3730a3; }
+.sir-extreme-high { background: #fff1e8; color: #9a3412; }
 .sir-repair-target { outline: 2px solid #b45309 !important; outline-offset: 3px; }
 
 #siriser-repair-compare {
