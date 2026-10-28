@@ -237,7 +237,7 @@
     let node;
     while ((node = walker.nextNode())) {
       const el = node.parentElement;
-      if (!el || !visible(el) || el.closest?.('#siriser-root,#siriser-repair-root,#siriser-result,#siriser-diag')) continue;
+      if (!el || !visible(el) || el.closest?.('#siriser-root,#siriser-repair-root,#siriser-repair-compare,#siriser-result,#siriser-diag')) continue;
       hits.push({ raw: node.nodeValue.trim(), el });
     }
     return hits;
@@ -285,6 +285,7 @@
 
   /** 只把占据图片槽位的破图作为模型候选，排除页面上零尺寸的小图标。 */
   function isBrokenModelImg(im) {
+    if (im?.closest?.('#siriser-repair-compare,#siriser-map,#siriser-lightbox')) return false;
     if (!hasBrokenImageSignature(im)) return false;
     const r = im.getBoundingClientRect ? im.getBoundingClientRect() : null;
     const w = Math.max(Number(im.width) || 0, (r && r.width) || 0);
@@ -295,6 +296,7 @@
   /** 真实生成图：排除错误占位图、icon、过小图 */
   function isRealGenImg(im) {
     if (!im) return false;
+    if (im.closest?.('#siriser-repair-compare,#siriser-map,#siriser-lightbox')) return false;
     if (hasBrokenImageSignature(im)) return false;
     const w = Number(im.naturalWidth) || 0;
     const h = Number(im.naturalHeight) || 0;
@@ -372,7 +374,8 @@
     window.waitForImagesReady = waitForImagesReady;
   } catch (_) {}
 
-  function collectVisuals() {
+  function collectVisuals(options) {
+    const previewOnly = !!options?.previewOnly;
     const { content } = getAreas();
     const modelRe = HEU.modelLabel || /(?:模型|model)\s*[-–—_：: ]*\s*([A-Za-z0-9]{1,4})/i;
     const refRe = HEU.refLabel || /^(参考图|原图|参考)$/i;
@@ -502,7 +505,7 @@
         name: id,
         labelEl: el,
         imgEl: img,
-        images: img ? [imgToDataURL(img)] : [],
+        images: img && !previewOnly ? [imgToDataURL(img)] : [],
         meta: imgMeta(img),
         strategy: "left-badge",
       });
@@ -525,7 +528,7 @@
           if (!img) return;
           usedImgs.add(img);
           m.imgEl = img;
-          m.images = [imgToDataURL(img)];
+          m.images = previewOnly ? [] : [imgToDataURL(img)];
           m.meta = imgMeta(img);
           m.strategy = "pool-fill-exact";
           log(`补图 ${m.id} ← ${m.meta.name} ${m.meta.w}x${m.meta.h}`);
@@ -560,7 +563,7 @@
     });
 
     return {
-      referenceImages: refImg ? [imgToDataURL(refImg)] : [],
+      referenceImages: refImg && !previewOnly ? [imgToDataURL(refImg)] : [],
       refImg,
       refMeta: imgMeta(refImg),
       models: Array.from(models.values()).sort((a, b) =>
@@ -4220,6 +4223,72 @@
     qa('.sir-repair-target').forEach((el) => el.classList.remove('sir-repair-target'));
   }
 
+  // 返修对照只用于人工查看；沿用页面图片，不压缩、不触发评分请求。
+  function showRepairComparison(modelId, state) {
+    let visual = state.compareVisual;
+    let model = visual?.models.find((item) => item.id === modelId);
+    if (!visual || !model?.imgEl?.isConnected || !visual.refImg?.isConnected) {
+      visual = collectVisuals({ previewOnly: true });
+      state.compareVisual = visual;
+      model = visual.models.find((item) => item.id === modelId);
+    }
+    let panel = document.getElementById('siriser-repair-compare');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'siriser-repair-compare';
+      panel.setAttribute('aria-label', '返修图片对比');
+      panel.innerHTML = `<div class="sir-repair-compare-head"><strong title="拖动窗口右下角可调整大小">返修图片对比</strong><button type="button" data-close>关闭</button></div>
+        <div class="sir-repair-compare-body"><div class="sir-repair-compare-prompt"><b>提示词</b><div data-prompt></div></div>
+        <div class="sir-repair-compare-images"><div><b>参考图</b><div data-ref></div></div><div><b data-model-title></b><div data-model></div></div></div></div>`;
+      document.body.appendChild(panel);
+      panel.querySelector('[data-close]').addEventListener('click', () => panel.classList.remove('open'));
+      panel.addEventListener('click', (event) => {
+        if (event.target.tagName === 'IMG') openLightbox(event.target.src, event.target.alt);
+      });
+      makeDraggable(panel, panel.querySelector('.sir-repair-compare-head'));
+    }
+    panel.querySelector('[data-prompt]').textContent = readPrompt() || '未识别到提示词';
+    panel.querySelector('[data-model-title]').textContent = `模型-${modelId}`;
+    const setImage = (slot, source, label) => {
+      slot.replaceChildren();
+      const src = source && (source.currentSrc || source.src || source.getAttribute('data-src'));
+      if (!src || hasBrokenImageSignature(source)) {
+        slot.textContent = '图片未加载或未识别，请查看原图';
+        return;
+      }
+      const image = document.createElement('img');
+      image.src = src;
+      image.alt = label;
+      image.addEventListener('error', () => { slot.textContent = '图片加载失败，请查看原图'; }, { once: true });
+      slot.appendChild(image);
+    };
+    setImage(panel.querySelector('[data-ref]'), visual.refImg, '参考图');
+    setImage(panel.querySelector('[data-model]'), model?.imgEl, `模型-${modelId}`);
+    panel.classList.add('open');
+  }
+
+  function bindRepairScoreComparison(state) {
+    const { groups } = collectScoreGroups();
+    const options = [];
+    groups.forEach((dims, model) => {
+      if (!/^[A-S]$/.test(model)) return;
+      for (const dim of DIMS) {
+        for (const option of Object.values(dims[dim]?.options || {})) options.push({ option, model });
+      }
+    });
+    state.compareOptions = options;
+    if (state.compareListener) return;
+    state.compareListener = (event) => {
+      if (!event.isTrusted || !_repairAssist || _repairAssist !== state || !event.target?.closest) return;
+      const target = event.target.closest('label,[role="radio"],input[type="radio"],input[type="checkbox"],.ant-radio-wrapper,.ant-radio-button-wrapper');
+      if (!target) return;
+      const match = state.compareOptions.find(({ option }) => option === target || option.contains?.(target) || target.contains?.(option));
+      if (match) showRepairComparison(match.model, state);
+    };
+    document.addEventListener('click', state.compareListener, true);
+    document.addEventListener('change', state.compareListener, true);
+  }
+
   function repairScoreAnchor(cell) {
     const options = cell && cell.options || {};
     const host = options['1'] || Object.values(options)[0];
@@ -4367,7 +4436,12 @@
         try {
           const result = await readRepairCommunication({ assistOnly: true });
           if (!result.corrections.length) {
+            if (_repairAssist?.compareListener) {
+              document.removeEventListener('click', _repairAssist.compareListener, true);
+              document.removeEventListener('change', _repairAssist.compareListener, true);
+            }
             _repairAssist = null;
+            document.getElementById('siriser-repair-compare')?.classList.remove('open');
             modelBox.replaceChildren();
             clearRepairAssistHints();
             // 诊断：把实际读到的原文开头暴露到控制台，便于区分「读到的文本不对」与「版本过旧」。
@@ -4389,8 +4463,13 @@
             modelBox.appendChild(modelButton);
           }
           const anchors = showRepairAssistHints(result.corrections);
+          if (_repairAssist?.compareListener) {
+            document.removeEventListener('click', _repairAssist.compareListener, true);
+            document.removeEventListener('change', _repairAssist.compareListener, true);
+          }
           _repairAssist = { ...result, scoreAnchors: anchors,
             imageAnchors: collectRepairImageAnchors(grouped.keys()) };
+          bindRepairScoreComparison(_repairAssist);
           status.textContent = `已解析 ${grouped.size} 个模型、${result.corrections.length} 个意见`;
           toastMsg(status.textContent + (result.closeUnconfirmed ? '；若沟通弹窗仍显示，请手动关闭' : ''));
         } catch (error) {

@@ -206,6 +206,33 @@ test('repair assistant is a narrow, always-open navigation strip without scoring
   assert.match(section('  async function resumeAutomationOnPage(', '  if (document.readyState'), /stopRepairMode\('自动返修已暂缓/);
 });
 
+test('repair comparison follows the manually selected score model only after parsing', () => {
+  const handlers = {};
+  const optionA = { contains: (node) => node.model === 'A' };
+  const optionB = { contains: (node) => node.model === 'B' };
+  const groups = new Map([
+    ['A', { alignment: { options: { 1: optionA } } }],
+    ['B', { quality: { options: { 3: optionB } } }],
+  ]);
+  const selected = [];
+  const context = {
+    DIMS: ['alignment', 'quality'], collectScoreGroups: () => ({ groups }),
+    document: { addEventListener: (name, fn) => { handlers[name] = fn; } },
+    showRepairComparison: (id) => selected.push(id),
+  };
+  vm.runInNewContext('let _repairAssist = null;\n' +
+    section('  function bindRepairScoreComparison(', '  function repairScoreAnchor(') +
+    '\nglobalThis.activate = (state) => { _repairAssist = state; bindRepairScoreComparison(state); };', context);
+  const state = {};
+  context.activate(state);
+  const eventFor = (model, isTrusted = true) => ({ isTrusted, target: { closest: () => ({ model, contains: () => false }) } });
+  handlers.click(eventFor('A'));
+  handlers.change(eventFor('B'));
+  handlers.click(eventFor('A', false));
+  handlers.click(eventFor('C'));
+  assert.deepEqual(selected, ['A', 'B']);
+});
+
 test('repair strip drag stays on screen and does not involve its action buttons', () => {
   const events = {};
   let captured = null;
